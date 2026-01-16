@@ -28,8 +28,8 @@ Template helps form a task list for feature implementation in the **spec-feature
 **What needs to be revealed in tasks**
 
 - `## Main directions` — group tasks by key directions from **CONTEXT** (API, UI, integrations, infrastructure, etc.). For each direction, allocate a separate subheading and list tasks within it.
-- `## Supporting tasks` — documentation, observability, quality, and other cross-cutting activities. If an item is not needed, replace it with an explanation of why it can be omitted.
-- `## Definition of Done` — feature completion criteria: tests, documentation, and other mandatory conditions.
+- `## Supporting tasks` — documentation, observability, quality, requirement traceability, and other cross-cutting activities. If an item is not needed, replace it with an explanation of why it can be omitted.
+- `## Definition of Done` — feature completion criteria: tests, documentation, requirement traceability verification, and other mandatory conditions.
 
 **Steps**
 
@@ -53,6 +53,7 @@ Template helps form a task list for feature implementation in the **spec-feature
 ## Supporting tasks
 
 - [ ] Documentation: update relevant instructions and descriptions.
+- [ ] Requirement traceability: create/update `spec/features/{FEATURE}/trace.json` with initial structure based on requirements from `spec.md`. Update `trace.json` throughout implementation as requirements are implemented, verified, and evidence is collected. Ensure all requirement IDs (REQ-001, REQ-002, etc.) from `spec.md` are present in `trace.json`.
 - [ ] Constitution: update `spec/constitution/*` if this feature introduced a new invariant, workflow constraint, or quality gate. If not required — reason: <explanation>.
 - [ ] Observability: add or clarify metrics, alerts, and/or logging.
 - [ ] Code review and PR: prepare changes for review and accompanying information.
@@ -62,6 +63,7 @@ Template helps form a task list for feature implementation in the **spec-feature
 - [ ] All tasks are completed and tested.
 - [ ] Relevant unit/e2e/integration tests pass successfully.
 - [ ] Documentation and operational instructions are updated.
+- [ ] `spec/features/{FEATURE}/trace.json` is created and updated: all requirements from `spec.md` are present, and all requirements have status `pass` or `fail` (no `unknown` statuses remain).
 - [ ] Constitution compliance is checked and `spec/constitution/*` is updated if required (otherwise explicitly marked as not required with a reason).
 - [ ] `/spec/core/verify.md` is executed after completing all tasks to verify the task list.
 

@@ -29,14 +29,24 @@ Template helps describe a feature before implementation in the **spec-feature** 
 - `## Non-functional requirements` — SLA, performance, security, localization, accessibility, and other non-functional criteria.
 - `## Assumptions` — explicit assumptions and open dependencies. Do not embed clarifying questions here; link to `clarifications.md` if any.
 
+**Requirement identification**
+
+- **MANDATORY:** All functional and non-functional requirements must have a unique identifier in the format `REQ-001`, `REQ-002`, `REQ-003`, etc.
+- Requirement IDs must be embedded inline at the beginning of each requirement: `REQ-001: Text of the requirement...`
+- IDs must use sequential numbering (REQ-001, REQ-002, etc.) across all sections of the specification.
+- Requirement identification applies to all sections: User Stories, Main scenarios and rules, and Non-functional requirements.
+- Each requirement (functional requirement, user story, scenario, rule, non-functional criterion) must have its own unique ID.
+- Example format: `REQ-001: User must be able to log in using email and password` or `REQ-002: API response time must not exceed 200ms for 95% of requests`.
+
 **Steps**
 
 1. Create the directory structure `spec/features/{FEATURE}/` if it doesn't exist.
 2. If any clarifying questions are needed, create/update `spec/features/{FEATURE}/clarifications.md` using `spec/core/clarifications.md`.
 3. Form the specification according to the sections above, based on **CONTEXT** and available additional context (including clarified answers, if present).
-4. Create/update the file `spec/features/{FEATURE}/spec.md` with the complete specification content.
-5. Check that the document is formatted in Markdown and contains no unfilled placeholders.
-6. Ensure the document is complete and ready for implementation.
+4. Assign unique requirement IDs (REQ-001, REQ-002, etc.) to all requirements in the specification, embedding them inline at the beginning of each requirement.
+5. Create/update the file `spec/features/{FEATURE}/spec.md` with the complete specification content.
+6. Check that the document is formatted in Markdown and contains no unfilled placeholders.
+7. Ensure all requirements have unique IDs and the document is complete and ready for implementation.
 
 **Result template**
 

@@ -31,9 +31,10 @@ Parameters are passed in one line in the format `#<feature># <context>` without 
 1. Check if `spec/features/{FEATURE}/` directory exists, create it if necessary.
 2. If any clarifying questions are needed, create/update `spec/features/{FEATURE}/clarifications.md` using `spec/core/clarifications.md`. If answers are missing and this blocks correct generation, stop here.
 3. Prepare and create/update specification `spec/features/{FEATURE}/spec.md` using the template from `spec/core/spec.md`, using **CONTEXT** as primary context (and clarified answers, if present).
-4. Based on the completed specification and **CONTEXT**, form and create/update plan `spec/features/{FEATURE}/plan.md` using the structure from `spec/core/plan.md`.
-5. Considering specification, plan, and **CONTEXT**, compile and create/update task list `spec/features/{FEATURE}/tasks.md` according to requirements from `spec/core/tasks.md`.
-6. Check that each document is formatted in valid Markdown and contains no unfilled sections.
+4. After `spec.md` is completed, extract all requirement IDs (REQ-001, REQ-002, etc.) from it and create initial `spec/features/{FEATURE}/trace.json` using the template from `spec/core/trace.md` with all requirements listed and status set to `unknown`.
+5. Based on the completed specification and **CONTEXT**, form and create/update plan `spec/features/{FEATURE}/plan.md` using the structure from `spec/core/plan.md`.
+6. Considering specification, plan, and **CONTEXT**, compile and create/update task list `spec/features/{FEATURE}/tasks.md` according to requirements from `spec/core/tasks.md`.
+7. Check that each document is formatted correctly (Markdown for documents, JSON for trace.json) and contains no unfilled sections.
 
 **Result structure**
 
@@ -41,8 +42,9 @@ The process should automatically create/update the following files:
 
 1. `spec/features/{FEATURE}/clarifications.md` - Clarifying questions and user answers (if needed)
 2. `spec/features/{FEATURE}/spec.md` - Feature specification document
-3. `spec/features/{FEATURE}/plan.md` - Implementation plan document  
-4. `spec/features/{FEATURE}/tasks.md` - Task list document
+3. `spec/features/{FEATURE}/trace.json` - Requirement traceability artifact (created after spec.md is completed)
+4. `spec/features/{FEATURE}/plan.md` - Implementation plan document  
+5. `spec/features/{FEATURE}/tasks.md` - Task list document
 
 Each document should be created with complete content based on the templates from `spec/core/` and the provided **CONTEXT**.
 
