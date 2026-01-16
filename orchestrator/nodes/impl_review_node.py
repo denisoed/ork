@@ -4,7 +4,15 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, Task, can_enter_node, is_valid_transition
+from orchestrator.state import (
+    SharedState, 
+    Task, 
+    can_enter_node, 
+    is_valid_transition,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.fs_tools import read_file, WORKSPACE_DIR
 from orchestrator.tools.spec_feature_tools import (
     read_spec_file,
@@ -136,14 +144,34 @@ def impl_review_node(state: SharedState, role: str) -> SharedState:
     
     _ensure_api_configured()
     
-    # Check if we can enter this node from current phase
+    # Check retry budget before proceeding
     current_phase = state.get('phase', 'INTAKE')
+    stage = get_current_stage(current_phase)
+    retry_budget = state.get('retry_budget', {})
+    
+    if check_retry_limit(stage, retry_budget):
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"impl_review_{role}",
+            f"Retry limit already reached for {stage} stage. Cannot proceed.",
+            task_id=target_task['id'] if target_task else None,
+            context={"action": "pre_execution_check", "role": role}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
+    
+    # Check if we can enter this node from current phase
     # impl_review nodes can be entered from EXECUTING phase
     if not can_enter_node("impl_review", current_phase):
-        return {
-            "error_logs": [{"node": f"impl_review_{role}", "error": f"Cannot enter impl_review from phase {current_phase}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"impl_review_{role}",
+            f"Cannot enter impl_review from phase {current_phase}",
+            task_id=target_task['id'] if target_task else None,
+            context={"current_phase": current_phase, "role": role}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     # Set phase to IMPL_REVIEW when starting review
     if current_phase != "IMPL_REVIEW":
@@ -285,31 +313,43 @@ If status is "issues", provide specific actionable issues that need to be fixed.
             
             print(f"[Impl Review:{role}] Created {len(corrective_tasks)} corrective task(s). Returning to EXECUTING.")
             
-            return {
-                "tasks_queue": existing_tasks,
-                "token_usage": token_update,
-                "phase": "EXECUTING",
-                "error_logs": [{
-                    "node": f"impl_review_{role}",
-                    "task_id": target_task['id'],
-                    "errors": issues
-                }]
-            }
+            # Handle error with retry budget for issues found
+            error_result = handle_error_with_retry_budget(
+                state,
+                f"impl_review_{role}",
+                f"Impl review found {len(issues)} issue(s): {summary[:200]}",
+                task_id=target_task['id'],
+                context={"issues": issues, "role": role}
+            )
+            error_result["tasks_queue"] = existing_tasks
+            error_result["token_usage"] = token_update
+            error_result["phase"] = "EXECUTING"
+            return error_result
         
     except json.JSONDecodeError as e:
         print(f"[Impl Review:{role}] JSON Parse Error: {e}")
         # On JSON error, proceed to validation (fail-safe)
-        return {
-            "error_logs": [{"node": f"impl_review_{role}", "error": f"Invalid JSON response: {e}"}],
-            "phase": "VALIDATING"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"impl_review_{role}",
+            f"Invalid JSON response: {e}",
+            task_id=target_task['id'] if target_task else None,
+            context={"role": role}
+        )
+        error_result["phase"] = "VALIDATING"
+        return error_result
     except Exception as e:
         print(f"[Impl Review:{role}] Error: {e}")
         # On error, proceed to validation (fail-safe)
-        return {
-            "error_logs": [{"node": f"impl_review_{role}", "error": str(e)}],
-            "phase": "VALIDATING"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"impl_review_{role}",
+            str(e),
+            task_id=target_task['id'] if target_task else None,
+            context={"role": role}
+        )
+        error_result["phase"] = "VALIDATING"
+        return error_result
 
 def impl_review_router(state: SharedState, role: str) -> str:
     """

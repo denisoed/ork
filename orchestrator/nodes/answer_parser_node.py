@@ -9,7 +9,14 @@ import re
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, answer_question, all_questions_answered
+from orchestrator.state import (
+    SharedState, 
+    answer_question, 
+    all_questions_answered,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.spec_feature_tools import (
     read_spec_file,
     write_spec_file,
@@ -163,14 +170,23 @@ def answer_parser_node(state: SharedState) -> SharedState:
     current_phase = state.get('phase', 'INTAKE')
     
     if not feature_name:
-        return {"error_logs": [{"node": "answer_parser", "error": "No feature_name in state."}]}
+        return handle_error_with_retry_budget(
+            state,
+            "answer_parser",
+            "No feature_name in state."
+        )
     
     print(f"[Answer Parser] Parsing answers for feature: {feature_name} (phase: {current_phase})")
     
     # Get user message
     user_msg = _get_last_user_message(state.get('messages', []))
     if not user_msg:
-        return {"error_logs": [{"node": "answer_parser", "error": "No user message found in state."}]}
+        return handle_error_with_retry_budget(
+            state,
+            "answer_parser",
+            "No user message found in state.",
+            context={"feature_name": feature_name}
+        )
     
     # Get open questions from state
     open_questions = state.get('open_questions', []).copy()
@@ -232,10 +248,14 @@ def answer_parser_node(state: SharedState) -> SharedState:
     
     if answered_count == 0:
         print("[Answer Parser] Could not match answer to any question")
-        return {
-            "error_logs": [{"node": "answer_parser", "error": "Could not match answer to any open question"}],
-            "messages": ["Answer Parser: Could not match your answer to any question. Please specify question number (e.g., '#1: answer')"]
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "answer_parser",
+            "Could not match answer to any open question",
+            context={"feature_name": feature_name, "user_message": user_msg[:200]}
+        )
+        error_result["messages"] = ["Answer Parser: Could not match your answer to any question. Please specify question number (e.g., '#1: answer')"]
+        return error_result
     
     # Update questions.md file
     if questions_content and updated_questions:

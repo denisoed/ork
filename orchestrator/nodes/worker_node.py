@@ -4,7 +4,14 @@ import hashlib
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, Task, add_evidence
+from orchestrator.state import (
+    SharedState, 
+    Task, 
+    add_evidence,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.fs_tools import read_file, write_file, list_files, WORKSPACE_DIR
 from orchestrator.tools.shell_tools import run_shell_command
 from orchestrator.tools.deploy_tools import (
@@ -190,15 +197,36 @@ def worker_node(state: SharedState, role: str) -> SharedState:
     _current_task_id[role] = target_task['id']
     print(f"[{role}] Starting task: {target_task['id']} - {target_task['description']}")
 
+    # Check retry budget before proceeding
+    phase = state.get('phase', 'EXECUTING')
+    stage = get_current_stage(phase)
+    retry_budget = state.get('retry_budget', {})
+    
+    if check_retry_limit(stage, retry_budget):
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"worker_{role}",
+            f"Retry limit already reached for {stage} stage. Cannot proceed.",
+            task_id=target_task['id'],
+            context={"action": "pre_execution_check", "task_description": target_task['description']}
+        )
+        error_result["tasks_queue"] = [target_task]
+        return error_result
+    
     # Ensure API is configured
     try:
         _ensure_api_configured()
     except ValueError as e:
         target_task['feedback'] = str(e)
-        return {
-            "error_logs": [{"node": f"worker_{role}", "task_id": target_task['id'], "error": str(e)}],
-            "tasks_queue": [target_task]
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"worker_{role}",
+            str(e),
+            task_id=target_task['id'],
+            context={"task_description": target_task['description']}
+        )
+        error_result["tasks_queue"] = [target_task]
+        return error_result
 
     # Get current files list
     files_snapshot = state.get('files_snapshot', {})
@@ -296,7 +324,12 @@ def worker_node(state: SharedState, role: str) -> SharedState:
         print(f"[{role}] Error in task {target_task['id']}: {e}")
         # Update task with error feedback for retry
         target_task['feedback'] = str(e)
-        return {
-            "error_logs": [{"node": f"worker_{role}", "task_id": target_task['id'], "error": str(e)}],
-            "tasks_queue": [target_task]
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"worker_{role}",
+            str(e),
+            task_id=target_task['id'],
+            context={"task_description": target_task['description']}
+        )
+        error_result["tasks_queue"] = [target_task]
+        return error_result

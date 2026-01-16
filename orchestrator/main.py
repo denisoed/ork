@@ -272,7 +272,14 @@ def run_orchestrator(user_input: str) -> dict:
             "open_questions": [],
             "acceptance_criteria": [],
             "evidence": [],
-            "final_validation_report": None
+            "final_validation_report": None,
+            # Retry budget: 3 attempts per stage by default
+            "retry_budget": {
+                "spec": {"current": 0, "max": 3},
+                "code": {"current": 0, "max": 3},
+                "validation": {"current": 0, "max": 3}
+            },
+            "decision_points": []
         }
         
         total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}

@@ -8,7 +8,13 @@ import json
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, add_open_question
+from orchestrator.state import (
+    SharedState, 
+    add_open_question,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.spec_feature_tools import (
     read_all_constitution_files,
     read_template_file,
@@ -60,7 +66,11 @@ def question_generator_node(state: SharedState) -> SharedState:
     current_phase = state.get('phase', 'INTAKE')
     
     if not feature_name:
-        return {"error_logs": [{"node": "question_generator", "error": "No feature_name in state."}]}
+        return handle_error_with_retry_budget(
+            state,
+            "question_generator",
+            "No feature_name in state."
+        )
     
     print(f"[Question Generator] Generating questions for feature: {feature_name} (phase: {current_phase})")
     
@@ -201,16 +211,24 @@ Focus on blocking questions only - information that MUST be known before proceed
     except json.JSONDecodeError as e:
         print(f"Question Generator JSON Parse Error: {e}")
         print(f"Response was: {response_text[:500]}")
-        return {
-            "error_logs": [{"node": "question_generator", "error": f"Invalid JSON response: {e}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "question_generator",
+            f"Invalid JSON response: {e}",
+            context={"response_preview": response_text[:200], "feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     except Exception as e:
         print(f"Question Generator Error: {e}")
-        return {
-            "error_logs": [{"node": "question_generator", "error": str(e)}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "question_generator",
+            str(e),
+            context={"feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
 
 def question_generator_router(state: SharedState) -> str:
     """

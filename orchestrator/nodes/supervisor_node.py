@@ -2,7 +2,15 @@ import json
 import os
 import time
 from typing import List, Dict, Any, Optional
-from orchestrator.state import SharedState, Task, can_enter_node, is_valid_transition
+from orchestrator.state import (
+    SharedState, 
+    Task, 
+    can_enter_node, 
+    is_valid_transition,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.utils.caching import get_cached_content
 from orchestrator.tools.spec_feature_tools import (
     read_spec_file,
@@ -139,13 +147,31 @@ def supervisor_node(state: SharedState) -> SharedState:
     # Ensure API is configured
     _ensure_api_configured()
     
-    # Check if we can enter this node from current phase
+    # Check retry budget before proceeding
     current_phase = state.get('phase', 'INTAKE')
+    stage = get_current_stage(current_phase)
+    retry_budget = state.get('retry_budget', {})
+    
+    if check_retry_limit(stage, retry_budget):
+        error_result = handle_error_with_retry_budget(
+            state,
+            "supervisor",
+            f"Retry limit already reached for {stage} stage. Cannot proceed.",
+            context={"action": "pre_execution_check"}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
+    
+    # Check if we can enter this node from current phase
     if not can_enter_node("supervisor", current_phase):
-        return {
-            "error_logs": [{"node": "supervisor", "error": f"Cannot enter supervisor from phase {current_phase}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "supervisor",
+            f"Cannot enter supervisor from phase {current_phase}",
+            context={"current_phase": current_phase}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     # Check if all tasks are already completed - no need to replan
     existing_tasks = state.get('tasks_queue', [])
@@ -176,7 +202,11 @@ def supervisor_node(state: SharedState) -> SharedState:
     
     user_msg = _get_last_user_message(state.get('messages', []))
     if not user_msg:
-        return {"error_logs": [{"node": "supervisor", "error": "No user message found in state."}]}
+        return handle_error_with_retry_budget(
+            state,
+            "supervisor",
+            "No user message found in state."
+        )
     
     # Read spec-feature specifications if available
     feature_name = state.get('feature_name')
@@ -326,13 +356,28 @@ INSTRUCTIONS: Use tasks.md as the primary source for creating tasks. Convert tas
         
     except json.JSONDecodeError as e:
         print(f"Supervisor JSON Parse Error: {e}")
-        return {"error_logs": [{"node": "supervisor", "error": f"Invalid JSON response: {e}"}]}
+        return handle_error_with_retry_budget(
+            state,
+            "supervisor",
+            f"Invalid JSON response: {e}",
+            context={"feature_name": feature_name}
+        )
     except ValueError as e:
         print(f"Supervisor Config Error: {e}")
-        return {"error_logs": [{"node": "supervisor", "error": str(e)}]}
+        return handle_error_with_retry_budget(
+            state,
+            "supervisor",
+            str(e),
+            context={"feature_name": feature_name}
+        )
     except Exception as e:
         print(f"Supervisor Error: {e}")
-        return {"error_logs": [{"node": "supervisor", "error": str(e)}]}
+        return handle_error_with_retry_budget(
+            state,
+            "supervisor",
+            str(e),
+            context={"feature_name": feature_name}
+        )
 
 def supervisor_router(state: SharedState) -> str:
     """
@@ -340,7 +385,7 @@ def supervisor_router(state: SharedState) -> str:
     Returns a single role string for the conditional edge.
     Checks phase before allowing transitions.
     """
-    from orchestrator.state import can_enter_node, is_valid_transition, has_open_questions
+    from orchestrator.state import can_enter_node, is_valid_transition, has_open_questions, has_open_decision_points
     
     # Check phase
     current_phase = state.get('phase', 'INTAKE')
@@ -349,6 +394,13 @@ def supervisor_router(state: SharedState) -> str:
     if not can_enter_node("supervisor", current_phase):
         print(f"[Supervisor Router] Illegal transition from phase {current_phase} to supervisor")
         return "__end__"
+    
+    # Check for open decision points (blocking)
+    if has_open_decision_points(state):
+        decision_points = state.get('decision_points', [])
+        open_count = len([dp for dp in decision_points if dp.get("status") == "open"])
+        print(f"[Supervisor Router] BLOCKED: Cannot proceed with {open_count} open decision point(s)")
+        return "__end__"  # BLOCKED - cannot proceed with open decision points
     
     # Additional check: block development if there are open questions
     if current_phase in ["EXEC_PLANNED", "EXECUTING", "IMPL_REVIEW"]:

@@ -8,7 +8,14 @@ import json
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, add_open_question, all_questions_answered
+from orchestrator.state import (
+    SharedState, 
+    add_open_question, 
+    all_questions_answered,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.spec_feature_tools import (
     read_feature_instructions,
     read_all_constitution_files,
@@ -70,10 +77,29 @@ def spec_planner_node(state: SharedState) -> SharedState:
     Specification Planner Node - creates specifications following spec/feature.md.
     Also handles RUN_TASKS intent to start execution phase.
     """
+    # Check retry budget before proceeding
+    phase = state.get('phase', 'INTAKE')
+    stage = get_current_stage(phase)
+    retry_budget = state.get('retry_budget', {})
+    
+    if check_retry_limit(stage, retry_budget):
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            f"Retry limit already reached for {stage} stage. Cannot proceed.",
+            context={"action": "pre_execution_check"}
+        )
+        return error_result
+    
     # Get user message
     user_msg = _get_last_user_message(state.get('messages', []))
     if not user_msg:
-        return {"error_logs": [{"node": "spec_planner", "error": "No user message found in state."}]}
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            "No user message found in state."
+        )
+        return error_result
     
     # Check for RUN_TASKS intent first
     run_tasks_result = parse_run_tasks_intent(user_msg)
@@ -86,10 +112,14 @@ def spec_planner_node(state: SharedState) -> SharedState:
         # Verify that tasks.md exists
         tasks_content = read_spec_file(feature_name, 'tasks', spec_path)
         if not tasks_content:
-            return {
-                "error_logs": [{"node": "spec_planner", "error": f"Tasks file not found: {tasks_path}. Please ensure specs are approved first."}],
-                "phase": "FAILED"
-            }
+            error_result = handle_error_with_retry_budget(
+                state,
+                "spec_planner",
+                f"Tasks file not found: {tasks_path}. Please ensure specs are approved first.",
+                context={"feature_name": feature_name, "tasks_path": tasks_path}
+            )
+            error_result["phase"] = "FAILED"
+            return error_result
         
         # Set phase to EXEC_PLANNED and return state
         return {
@@ -107,7 +137,12 @@ def spec_planner_node(state: SharedState) -> SharedState:
     try:
         feature_name, context = parse_feature_request(user_msg)
     except Exception as e:
-        return {"error_logs": [{"node": "spec_planner", "error": f"Error parsing feature request: {e}"}]}
+        return handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            f"Error parsing feature request: {e}",
+            context={"user_message": user_msg[:200]}
+        )
     
     print(f"[Spec Planner] Processing feature: {feature_name}")
     
@@ -118,7 +153,12 @@ def spec_planner_node(state: SharedState) -> SharedState:
     try:
         feature_instructions = read_feature_instructions(spec_path)
     except Exception as e:
-        return {"error_logs": [{"node": "spec_planner", "error": f"Error reading spec/feature.md: {e}"}]}
+        return handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            f"Error reading spec/feature.md: {e}",
+            context={"spec_path": spec_path, "feature_name": feature_name}
+        )
     
     # Read constitution
     try:
@@ -139,7 +179,12 @@ def spec_planner_node(state: SharedState) -> SharedState:
     
     # Ensure feature directory exists
     if not ensure_feature_directory(feature_name, spec_path):
-        return {"error_logs": [{"node": "spec_planner", "error": f"Could not create feature directory for {feature_name}"}]}
+        return handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            f"Could not create feature directory for {feature_name}",
+            context={"feature_name": feature_name, "spec_path": spec_path}
+        )
     
     # Check if feature already exists (for updates)
     existing_spec = read_spec_file(feature_name, 'spec', spec_path)
@@ -251,16 +296,31 @@ Otherwise, set clarifications to null and provide all three files.
     except json.JSONDecodeError as e:
         print(f"Spec Planner JSON Parse Error: {e}")
         print(f"Response was: {response_text[:500]}")
-        return {"error_logs": [{"node": "spec_planner", "error": f"Invalid JSON response: {e}"}]}
+        return handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            f"Invalid JSON response: {e}",
+            context={"response_preview": response_text[:200]}
+        )
     except Exception as e:
         print(f"Spec Planner Error: {e}")
-        return {"error_logs": [{"node": "spec_planner", "error": str(e)}]}
+        return handle_error_with_retry_budget(
+            state,
+            "spec_planner",
+            str(e),
+            context={"feature_name": feature_name}
+        )
 
 def spec_planner_router(state: SharedState) -> str:
     """
     Router for spec planner - determines next step based on phase.
     """
-    from orchestrator.state import can_enter_node, is_valid_transition, has_open_questions
+    from orchestrator.state import (
+        can_enter_node, 
+        is_valid_transition, 
+        has_open_questions, 
+        has_open_decision_points
+    )
     
     current_phase = state.get('phase', 'INTAKE')
     
@@ -268,6 +328,13 @@ def spec_planner_router(state: SharedState) -> str:
     if not can_enter_node("spec_planner", current_phase) and current_phase not in ["INTAKE", "EXEC_PLANNED"]:
         print(f"[Spec Planner Router] Illegal transition from phase {current_phase} to spec_planner")
         return "__end__"
+    
+    # Check for open decision points (blocking)
+    if has_open_decision_points(state):
+        decision_points = state.get('decision_points', [])
+        open_count = len([dp for dp in decision_points if dp.get("status") == "open"])
+        print(f"[Spec Planner Router] BLOCKED: Cannot proceed with {open_count} open decision point(s)")
+        return "__end__"  # BLOCKED - cannot proceed with open decision points
     
     # If RUN_TASKS intent was processed, check for open questions (BLOCKING)
     if current_phase == "EXEC_PLANNED":

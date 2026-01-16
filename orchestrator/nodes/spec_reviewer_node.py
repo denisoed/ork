@@ -8,7 +8,15 @@ import json
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, add_open_question, all_questions_answered, is_valid_transition
+from orchestrator.state import (
+    SharedState, 
+    add_open_question, 
+    all_questions_answered, 
+    is_valid_transition,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.spec_feature_tools import (
     read_all_constitution_files,
     read_template_file,
@@ -61,15 +69,38 @@ def spec_reviewer_node(state: SharedState) -> SharedState:
     spec_path = state.get('spec_path', 'spec/')
     current_phase = state.get('phase', 'INTAKE')
     
+    # Check retry budget before proceeding
+    stage = get_current_stage(current_phase)
+    retry_budget = state.get('retry_budget', {})
+    
+    if check_retry_limit(stage, retry_budget):
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_reviewer",
+            f"Retry limit already reached for {stage} stage. Cannot proceed.",
+            context={"action": "pre_execution_check"}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
+    
     # Check if we can enter this node from current phase
     if not can_enter_node("spec_reviewer", current_phase):
-        return {
-            "error_logs": [{"node": "spec_reviewer", "error": f"Cannot enter spec_reviewer from phase {current_phase}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_reviewer",
+            f"Cannot enter spec_reviewer from phase {current_phase}",
+            context={"current_phase": current_phase}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     if not feature_name:
-        return {"error_logs": [{"node": "spec_reviewer", "error": "No feature_name in state."}]}
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_reviewer",
+            "No feature_name in state."
+        )
+        return error_result
     
     # Set phase to SPEC_REVIEW when starting review
     print(f"[Spec Reviewer] Reviewing feature: {feature_name} (phase: {current_phase} -> SPEC_REVIEW)")
@@ -81,10 +112,14 @@ def spec_reviewer_node(state: SharedState) -> SharedState:
     questions_content = read_spec_file(feature_name, 'questions', spec_path)
     
     if not spec_content or not plan_content or not tasks_content:
-        return {
-            "error_logs": [{"node": "spec_reviewer", "error": "Missing specification files"}],
-            "phase": "QUESTIONS_PENDING"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_reviewer",
+            "Missing specification files",
+            context={"feature_name": feature_name, "spec_path": spec_path}
+        )
+        error_result["phase"] = "QUESTIONS_PENDING"
+        return error_result
     
     # Read constitution
     try:
@@ -214,28 +249,43 @@ If status is "needs_revision", provide specific issues and questions that need t
     except json.JSONDecodeError as e:
         print(f"Spec Reviewer JSON Parse Error: {e}")
         print(f"Response was: {response_text[:500]}")
-        return {
-            "error_logs": [{"node": "spec_reviewer", "error": f"Invalid JSON response: {e}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_reviewer",
+            f"Invalid JSON response: {e}",
+            context={"response_preview": response_text[:200], "feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     except Exception as e:
         print(f"Spec Reviewer Error: {e}")
-        return {
-            "error_logs": [{"node": "spec_reviewer", "error": str(e)}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_reviewer",
+            str(e),
+            context={"feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
 
 def spec_reviewer_router(state: SharedState) -> str:
     """
     Router for spec reviewer - determines next step based on phase.
     """
-    from orchestrator.state import can_enter_node
+    from orchestrator.state import can_enter_node, has_open_decision_points
     
     current_phase = state.get('phase', 'INTAKE')
     
     # Check if we can enter this node from current phase
     if not can_enter_node("spec_reviewer", current_phase):
         print(f"[Spec Reviewer Router] Illegal transition from phase {current_phase} to spec_reviewer")
+        return "__end__"
+    
+    # Check for open decision points (blocking)
+    if has_open_decision_points(state):
+        decision_points = state.get('decision_points', [])
+        open_count = len([dp for dp in decision_points if dp.get("status") == "open"])
+        print(f"[Spec Reviewer Router] BLOCKED: Cannot proceed with {open_count} open decision point(s)")
         return "__end__"
     
     # After review, check the resulting phase

@@ -459,9 +459,19 @@ def validator_node(state: SharedState, role: str) -> SharedState:
             status="failed"
         )
         
-        return {
-            "tasks_queue": [target_task],
-            "recursion_depth": state.get("recursion_depth", 0) + 1,
-            "error_logs": [{"node": f"validator_{role}", "task_id": target_task['id'], "errors": error_messages}],
-            "evidence": evidence_list
-        }
+        # Handle error with retry budget
+        error_result = handle_error_with_retry_budget(
+            state,
+            f"validator_{role}",
+            error_summary,
+            task_id=target_task['id'],
+            context={
+                "task_description": target_task['description'],
+                "all_errors": error_messages,
+                "retry_count": target_task['retry_count']
+            }
+        )
+        error_result["tasks_queue"] = [target_task]
+        error_result["recursion_depth"] = state.get("recursion_depth", 0) + 1
+        error_result["evidence"] = evidence_list
+        return error_result

@@ -73,6 +73,45 @@ def merge_deployment_urls(current: Optional[Dict[str, str]], updates: Optional[D
     return {**current, **updates}
 
 
+def extend_error_logs(current: Optional[List[Dict[str, Any]]], updates: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """
+    Extend error logs by appending new errors to existing ones.
+    Unlike merge_lists, this does not deduplicate - all errors are kept.
+    """
+    current = current or []
+    updates = updates or []
+    if not updates:
+        return current
+    # Simply append all new errors to the current list
+    return current + updates
+
+
+def merge_retry_budget(
+    current: Optional[Dict[str, Dict[str, int]]], 
+    updates: Optional[Dict[str, Dict[str, int]]]
+) -> Dict[str, Dict[str, int]]:
+    """
+    Merge retry budget by updating current values with new ones.
+    Structure: {"spec": {"current": int, "max": int}, "code": {...}, "validation": {...}}
+    """
+    current = current or {}
+    updates = updates or {}
+    
+    # Start with current values
+    result = {}
+    for stage in ["spec", "code", "validation"]:
+        result[stage] = current.get(stage, {"current": 0, "max": 3}).copy()
+    
+    # Apply updates (updates override current values)
+    for stage, budget in updates.items():
+        if stage in result:
+            result[stage].update(budget)
+        else:
+            result[stage] = budget.copy()
+    
+    return result
+
+
 def merge_lists(current: Optional[List[Any]], updates: Optional[List[Any]]) -> List[Any]:
     """
     Merge lists by appending updates to current, removing duplicates.
@@ -143,6 +182,23 @@ NODE_PHASES: Dict[str, List[str]] = {
     "impl_review": ["EXECUTING", "IMPL_REVIEW"],  # Can enter from EXECUTING phase
     "validator": ["VALIDATING", "IMPL_REVIEW"],  # Can enter from VALIDATING phase (after impl_review)
     "final_validator": ["EXECUTING", "VALIDATING"]
+}
+
+# Phase to stage mapping: which stage each phase belongs to
+PHASE_TO_STAGE: Dict[str, str] = {
+    "INTAKE": "spec",
+    "SPEC_DRAFT": "spec",
+    "SPEC_REVIEW": "spec",
+    "QUESTIONS_PENDING": "spec",
+    "SPEC_APPROVED": "spec",
+    "EXEC_PLANNED": "code",
+    "EXECUTING": "code",
+    "IMPL_REVIEW": "code",
+    "VALIDATING": "validation",
+    "TRACE_VALIDATION": "validation",
+    "DONE": "validation",  # Terminal state
+    "FAILED": "spec",  # Default to spec for recovery
+    "NEEDS_USER_DECISION": "spec"  # Default to spec for recovery
 }
 
 
@@ -373,6 +429,206 @@ def update_evidence_status(
     return False
 
 
+def get_current_stage(phase: str) -> str:
+    """
+    Get the current stage (spec, code, validation) for a given phase.
+    
+    Args:
+        phase: Current phase
+        
+    Returns:
+        Stage name: "spec", "code", or "validation"
+    """
+    return PHASE_TO_STAGE.get(phase, "spec")
+
+
+def increment_retry_count(stage: str, retry_budget: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
+    """
+    Increment retry count for a specific stage.
+    
+    Args:
+        stage: Stage name ("spec", "code", or "validation")
+        retry_budget: Current retry budget dictionary
+        
+    Returns:
+        Updated retry budget dictionary
+    """
+    result = {}
+    for s in ["spec", "code", "validation"]:
+        result[s] = retry_budget.get(s, {"current": 0, "max": 3}).copy()
+    
+    if stage in result:
+        result[stage]["current"] = result[stage].get("current", 0) + 1
+    
+    return result
+
+
+def check_retry_limit(stage: str, retry_budget: Dict[str, Dict[str, int]]) -> bool:
+    """
+    Check if retry limit has been reached for a specific stage.
+    
+    Args:
+        stage: Stage name ("spec", "code", or "validation")
+        retry_budget: Current retry budget dictionary
+        
+    Returns:
+        True if limit reached, False otherwise
+    """
+    stage_budget = retry_budget.get(stage, {"current": 0, "max": 3})
+    current = stage_budget.get("current", 0)
+    max_retries = stage_budget.get("max", 3)
+    return current >= max_retries
+
+
+def add_decision_point(
+    decision_points: List[Dict[str, Any]],
+    phase: str,
+    stage: str,
+    description: str,
+    options: Optional[List[str]] = None,
+    context: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Add a decision point to the list and return its ID.
+    
+    Args:
+        decision_points: Current list of decision points
+        phase: Current phase
+        stage: Current stage (spec, code, validation)
+        description: Description of the decision needed
+        options: Optional list of answer options
+        context: Optional context information
+        
+    Returns:
+        Generated decision point ID
+    """
+    decision_id = str(uuid.uuid4())
+    decision_dict: Dict[str, Any] = {
+        "id": decision_id,
+        "phase": phase,
+        "stage": stage,
+        "description": description,
+        "status": "open",
+        "created_at": datetime.now().isoformat()
+    }
+    if options:
+        decision_dict["options"] = options
+    if context:
+        decision_dict["context"] = context
+    
+    decision_points.append(decision_dict)
+    return decision_id
+
+
+def has_open_decision_points(state: SharedState) -> bool:
+    """
+    Check if there are any open decision points blocking execution.
+    
+    Args:
+        state: SharedState to check
+        
+    Returns:
+        True if there are open decision points, False otherwise
+    """
+    decision_points = state.get('decision_points', [])
+    return any(dp.get("status") == "open" for dp in decision_points)
+
+
+def handle_error_with_retry_budget(
+    state: SharedState,
+    node_name: str,
+    error_message: str,
+    task_id: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Handle error with retry budget tracking and escalation.
+    Increments retry count for current stage and creates decision_point if limit reached.
+    
+    Args:
+        state: Current state
+        node_name: Name of the node reporting the error
+        error_message: Error message
+        task_id: Optional task ID if error is task-related
+        context: Optional context information
+        
+    Returns:
+        Dictionary with updates to apply to state (error_logs, retry_budget, decision_points, phase)
+    """
+    phase = state.get('phase', 'INTAKE')
+    stage = get_current_stage(phase)
+    retry_budget = state.get('retry_budget', {})
+    decision_points = state.get('decision_points', []).copy()
+    
+    # Increment retry count
+    updated_retry_budget = increment_retry_count(stage, retry_budget)
+    
+    # Check if limit reached
+    limit_reached = check_retry_limit(stage, updated_retry_budget)
+    
+    # Prepare error log entry
+    error_entry = {
+        "node": node_name,
+        "error": error_message,
+        "phase": phase,
+        "stage": stage,
+        "timestamp": datetime.now().isoformat()
+    }
+    if task_id:
+        error_entry["task_id"] = task_id
+    
+    result = {
+        "error_logs": [error_entry],
+        "retry_budget": updated_retry_budget
+    }
+    
+    # If limit reached, create decision point and escalate
+    if limit_reached:
+        stage_budget = updated_retry_budget.get(stage, {})
+        current_count = stage_budget.get("current", 0)
+        max_retries = stage_budget.get("max", 3)
+        
+        decision_description = (
+            f"Retry limit reached for {stage} stage ({current_count}/{max_retries} attempts). "
+            f"Error: {error_message}"
+        )
+        
+        decision_options = [
+            "Continue with manual fix",
+            "Retry with different approach",
+            "Skip this step",
+            "Abort and review"
+        ]
+        
+        decision_context = {
+            "node": node_name,
+            "stage": stage,
+            "phase": phase,
+            "retry_count": current_count,
+            "error": error_message
+        }
+        if task_id:
+            decision_context["task_id"] = task_id
+        if context:
+            decision_context.update(context)
+        
+        add_decision_point(
+            decision_points,
+            phase=phase,
+            stage=stage,
+            description=decision_description,
+            options=decision_options,
+            context=decision_context
+        )
+        
+        result["decision_points"] = decision_points
+        result["phase"] = "NEEDS_USER_DECISION"
+        
+        print(f"[Error Handler] Retry limit reached for {stage} stage. Escalating to user decision.")
+    
+    return result
+
+
 class SharedState(TypedDict):
     """
     Global state shared across all nodes in the graph.
@@ -388,8 +644,8 @@ class SharedState(TypedDict):
     # Mapping: "path/to/file" -> "file_hash" or concise summary
     files_snapshot: Dict[str, str]
     
-    # Accumulated error logs for analysis
-    error_logs: List[Dict[str, Any]]
+    # Accumulated error logs for analysis (uses extend reducer to accumulate, not overwrite)
+    error_logs: Annotated[List[Dict[str, Any]], extend_error_logs]
     
     # Global retry counters to prevent infinite loops (Graph recursion limit)
     recursion_depth: Annotated[int, reduce_max]
@@ -418,3 +674,9 @@ class SharedState(TypedDict):
     
     # Final validation report
     final_validation_report: Optional[Dict[str, Any]]  # Final validation report
+    
+    # Retry budget tracking by stage (spec, code, validation)
+    retry_budget: Annotated[Dict[str, Dict[str, int]], merge_retry_budget]  # {stage: {"current": int, "max": int}}
+    
+    # Decision points where user input is needed (compromises/ambiguities)
+    decision_points: Annotated[List[Dict[str, Any]], merge_lists]  # {id, phase, stage, description, options[], context, status, created_at}

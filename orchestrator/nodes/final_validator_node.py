@@ -9,7 +9,12 @@ from datetime import datetime
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState
+from orchestrator.state import (
+    SharedState,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.spec_feature_tools import (
     read_all_constitution_files,
     read_template_file,
@@ -400,15 +405,38 @@ def final_validator_node(state: SharedState) -> SharedState:
     spec_path = state.get('spec_path', 'spec/')
     current_phase = state.get('phase', 'INTAKE')
     
+    # Check retry budget before proceeding
+    stage = get_current_stage(current_phase)
+    retry_budget = state.get('retry_budget', {})
+    
+    if check_retry_limit(stage, retry_budget):
+        error_result = handle_error_with_retry_budget(
+            state,
+            "final_validator",
+            f"Retry limit already reached for {stage} stage. Cannot proceed.",
+            context={"action": "pre_execution_check"}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
+    
     # Check if we can enter this node from current phase
     if not can_enter_node("final_validator", current_phase):
-        return {
-            "error_logs": [{"node": "final_validator", "error": f"Cannot enter final_validator from phase {current_phase}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "final_validator",
+            f"Cannot enter final_validator from phase {current_phase}",
+            context={"current_phase": current_phase}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     if not feature_name:
-        return {"error_logs": [{"node": "final_validator", "error": "No feature_name in state."}]}
+        error_result = handle_error_with_retry_budget(
+            state,
+            "final_validator",
+            "No feature_name in state."
+        )
+        return error_result
     
     # Set phase to VALIDATING when starting validation
     print(f"[Final Validator] Validating feature: {feature_name} (phase: {current_phase} -> VALIDATING)")
@@ -419,10 +447,14 @@ def final_validator_node(state: SharedState) -> SharedState:
     tasks_content = read_spec_file(feature_name, 'tasks', spec_path)
     
     if not spec_content or not plan_content or not tasks_content:
-        return {
-            "error_logs": [{"node": "final_validator", "error": "Missing specification files"}],
-            "final_validation_report": {"status": "failed", "error": "Missing specifications"}
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "final_validator",
+            "Missing specification files",
+            context={"feature_name": feature_name, "spec_path": spec_path}
+        )
+        error_result["final_validation_report"] = {"status": "failed", "error": "Missing specifications"}
+        return error_result
     
     # Read original user request
     user_request = ""
@@ -637,15 +669,23 @@ Status: {validation_result.get('status', 'unknown')}
     except json.JSONDecodeError as e:
         print(f"Final Validator JSON Parse Error: {e}")
         print(f"Response was: {response_text[:500]}")
-        return {
-            "error_logs": [{"node": "final_validator", "error": f"Invalid JSON response: {e}"}],
-            "final_validation_report": {"status": "failed", "error": "JSON parse error"},
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "final_validator",
+            f"Invalid JSON response: {e}",
+            context={"response_preview": response_text[:200], "feature_name": feature_name}
+        )
+        error_result["final_validation_report"] = {"status": "failed", "error": "JSON parse error"}
+        error_result["phase"] = "FAILED"
+        return error_result
     except Exception as e:
         print(f"Final Validator Error: {e}")
-        return {
-            "error_logs": [{"node": "final_validator", "error": str(e)}],
-            "final_validation_report": {"status": "failed", "error": str(e)},
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "final_validator",
+            str(e),
+            context={"feature_name": feature_name}
+        )
+        error_result["final_validation_report"] = {"status": "failed", "error": str(e)}
+        error_result["phase"] = "FAILED"
+        return error_result

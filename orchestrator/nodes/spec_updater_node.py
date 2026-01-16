@@ -8,7 +8,13 @@ import json
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, all_questions_answered
+from orchestrator.state import (
+    SharedState, 
+    all_questions_answered,
+    get_current_stage,
+    check_retry_limit,
+    handle_error_with_retry_budget
+)
 from orchestrator.tools.spec_feature_tools import (
     read_all_constitution_files,
     read_spec_file,
@@ -59,17 +65,25 @@ def spec_updater_node(state: SharedState) -> SharedState:
     current_phase = state.get('phase', 'INTAKE')
     
     if not feature_name:
-        return {"error_logs": [{"node": "spec_updater", "error": "No feature_name in state."}]}
+        return handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            "No feature_name in state."
+        )
     
     print(f"[Spec Updater] Updating spec files for feature: {feature_name} (phase: {current_phase})")
     
     # Check if all questions are answered
     open_questions = state.get('open_questions', [])
     if not all_questions_answered(open_questions):
-        return {
-            "error_logs": [{"node": "spec_updater", "error": "Not all questions are answered yet"}],
-            "messages": ["Spec Updater: Not all questions are answered. Please provide answers for all questions first."]
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            "Not all questions are answered yet",
+            context={"feature_name": feature_name}
+        )
+        error_result["messages"] = ["Spec Updater: Not all questions are answered. Please provide answers for all questions first."]
+        return error_result
     
     # Read specification files
     spec_content = read_spec_file(feature_name, 'spec', spec_path)
@@ -78,16 +92,24 @@ def spec_updater_node(state: SharedState) -> SharedState:
     questions_content = read_spec_file(feature_name, 'questions', spec_path)
     
     if not spec_content or not tasks_content:
-        return {
-            "error_logs": [{"node": "spec_updater", "error": "Missing spec.md or tasks.md files"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            "Missing spec.md or tasks.md files",
+            context={"feature_name": feature_name, "spec_path": spec_path}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     if not questions_content:
-        return {
-            "error_logs": [{"node": "spec_updater", "error": "Missing questions.md file"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            "Missing questions.md file",
+            context={"feature_name": feature_name, "spec_path": spec_path}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     # Read constitution
     try:
@@ -105,10 +127,14 @@ def spec_updater_node(state: SharedState) -> SharedState:
             answers_summary.append(f"Q: {question_text}\nA: {answer_text}")
     
     if not answers_summary:
-        return {
-            "error_logs": [{"node": "spec_updater", "error": "No answers found in questions"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            "No answers found in questions",
+            context={"feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     
     answers_text = "\n\n".join(answers_summary)
     
@@ -174,10 +200,14 @@ Update spec.md and tasks.md based on the answers provided.
         summary = result.get("summary", "")
         
         if not updated_spec or not updated_tasks:
-            return {
-                "error_logs": [{"node": "spec_updater", "error": "LLM did not return updated spec or tasks"}],
-                "phase": "FAILED"
-            }
+            error_result = handle_error_with_retry_budget(
+                state,
+                "spec_updater",
+                "LLM did not return updated spec or tasks",
+                context={"feature_name": feature_name}
+            )
+            error_result["phase"] = "FAILED"
+            return error_result
         
         # Write updated files
         write_spec_file(feature_name, "spec", updated_spec, spec_path)
@@ -204,16 +234,24 @@ Update spec.md and tasks.md based on the answers provided.
     except json.JSONDecodeError as e:
         print(f"Spec Updater JSON Parse Error: {e}")
         print(f"Response was: {response_text[:500]}")
-        return {
-            "error_logs": [{"node": "spec_updater", "error": f"Invalid JSON response: {e}"}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            f"Invalid JSON response: {e}",
+            context={"response_preview": response_text[:200], "feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
     except Exception as e:
         print(f"Spec Updater Error: {e}")
-        return {
-            "error_logs": [{"node": "spec_updater", "error": str(e)}],
-            "phase": "FAILED"
-        }
+        error_result = handle_error_with_retry_budget(
+            state,
+            "spec_updater",
+            str(e),
+            context={"feature_name": feature_name}
+        )
+        error_result["phase"] = "FAILED"
+        return error_result
 
 def spec_updater_router(state: SharedState) -> str:
     """
