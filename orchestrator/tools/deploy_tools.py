@@ -11,6 +11,15 @@ import subprocess
 from typing import Dict, Optional, List
 from orchestrator.tools.fs_tools import WORKSPACE_DIR, ensure_workspace
 from orchestrator.utils.secrets import SecretManager
+from orchestrator.tools.validation_artifacts import save_command_log
+from orchestrator.tools.shell_tools import (
+    ALLOWED_DEPLOY_COMMANDS,
+    _validate_no_newlines,
+    _validate_no_newlines_in_args,
+    _check_command_allowlist,
+    _check_directory_allowlist,
+    is_deploy_command
+)
 
 
 def _run_deploy_command(command: List[str], timeout: int = 300) -> Dict[str, any]:
@@ -18,7 +27,7 @@ def _run_deploy_command(command: List[str], timeout: int = 300) -> Dict[str, any
     Execute a deployment command with extended timeout.
     
     Args:
-        command: Shell command to execute
+        command: Shell command to execute as list of arguments
         timeout: Timeout in seconds (default 5 minutes)
         
     Returns:
@@ -26,7 +35,55 @@ def _run_deploy_command(command: List[str], timeout: int = 300) -> Dict[str, any
     """
     ensure_workspace()
     
+    # Convert command list to string for logging and validation
+    command_str = ' '.join(command)
+    
+    # 1. Check for \n/\r in each element of command
+    is_valid, error_msg = _validate_no_newlines_in_args(command)
+    if not is_valid:
+        error_msg = f"Error: {error_msg}"
+        save_command_log(command_str, error_msg, exit_code=-1, log_type="deploy")
+        return {
+            'success': False,
+            'output': error_msg,
+            'return_code': -1
+        }
+    
+    # 2. Check command allowlist (command[0] is the command name)
+    if not command:
+        error_msg = "Error: Empty command"
+        save_command_log(command_str, error_msg, exit_code=-1, log_type="deploy")
+        return {
+            'success': False,
+            'output': error_msg,
+            'return_code': -1
+        }
+    
+    command_name = command[0]
+    is_deploy = is_deploy_command(command_str)
+    is_allowed, error_msg = _check_command_allowlist(command_name, full_command=command_str, is_deploy=is_deploy)
+    if not is_allowed:
+        error_msg = f"Error: {error_msg}"
+        save_command_log(command_str, error_msg, exit_code=-1, log_type="deploy")
+        return {
+            'success': False,
+            'output': error_msg,
+            'return_code': -1
+        }
+    
+    # 3. Check directory allowlist (only WORKSPACE_DIR allowed)
+    is_allowed, error_msg = _check_directory_allowlist(WORKSPACE_DIR)
+    if not is_allowed:
+        error_msg = f"Error: {error_msg}"
+        save_command_log(command_str, error_msg, exit_code=-1, log_type="deploy")
+        return {
+            'success': False,
+            'output': error_msg,
+            'return_code': -1
+        }
+    
     try:
+        # 4. Execute command with shell=False
         # Get deployment environment variables
         deploy_env = {**os.environ, **SecretManager.get_deployment_env()}
         
@@ -44,6 +101,9 @@ def _run_deploy_command(command: List[str], timeout: int = 300) -> Dict[str, any
         if result.stderr:
             output += f"\n{result.stderr}"
         
+        # 5. Always log the command execution
+        save_command_log(command_str, output, exit_code=result.returncode, log_type="deploy")
+        
         return {
             'success': result.returncode == 0,
             'output': output,
@@ -51,15 +111,19 @@ def _run_deploy_command(command: List[str], timeout: int = 300) -> Dict[str, any
         }
         
     except subprocess.TimeoutExpired:
+        error_msg = f"Command timed out after {timeout} seconds"
+        save_command_log(command_str, error_msg, exit_code=-1, log_type="deploy")
         return {
             'success': False,
-            'output': f"Command timed out after {timeout} seconds",
+            'output': error_msg,
             'return_code': -1
         }
     except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        save_command_log(command_str, error_msg, exit_code=-1, log_type="deploy")
         return {
             'success': False,
-            'output': f"Error: {str(e)}",
+            'output': error_msg,
             'return_code': -1
         }
 
