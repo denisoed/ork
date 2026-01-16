@@ -78,7 +78,7 @@ def spec_reviewer_node(state: SharedState) -> SharedState:
     spec_content = read_spec_file(feature_name, 'spec', spec_path)
     plan_content = read_spec_file(feature_name, 'plan', spec_path)
     tasks_content = read_spec_file(feature_name, 'tasks', spec_path)
-    clarifications_content = read_spec_file(feature_name, 'clarifications', spec_path)
+    questions_content = read_spec_file(feature_name, 'questions', spec_path)
     
     if not spec_content or not plan_content or not tasks_content:
         return {
@@ -93,10 +93,10 @@ def spec_reviewer_node(state: SharedState) -> SharedState:
         print(f"Warning: Could not read constitution: {e}")
         constitution = ""
     
-    # Read clarifications template if needed
-    clarifications_template = ""
+    # Read questions template if needed (for reference)
+    questions_template = ""
     try:
-        clarifications_template = read_template_file('clarifications.md', spec_path)
+        questions_template = read_template_file('questions.md', spec_path)
     except Exception:
         pass
     
@@ -117,8 +117,8 @@ SPECIFICATION FILES TO REVIEW:
 === tasks.md ===
 {tasks_content[:4000]}
 
-=== clarifications.md (if exists) ===
-{clarifications_content[:1000] if clarifications_content else "None"}
+=== questions.md (if exists) ===
+{questions_content[:1000] if questions_content else "None"}
 
 REVIEW CRITERIA:
 1. Completeness: Are all required sections filled? No empty headers or placeholders?
@@ -173,19 +173,8 @@ If status is "needs_revision", provide specific issues and questions that need t
         for q in questions:
             add_open_question(open_questions, q)
         
-        # If questions are needed, update clarifications.md
-        if questions and status == "needs_revision":
-            clarifications_content_new = clarifications_content or ""
-            if clarifications_template:
-                clarifications_content_new = clarifications_template
-            
-            # Add new questions
-            questions_section = "\n\n## New Questions\n\n"
-            for i, q in enumerate(questions, 1):
-                questions_section += f"### Question #{i}\n{q}\n\n**Answer:**\n\n"
-            
-            clarifications_content_new += questions_section
-            write_spec_file(feature_name, "clarifications", clarifications_content_new, spec_path)
+        # If questions are needed, they will be processed by question_generator_node
+        # We just mark them here and let the router handle the transition
         
         # Extract usage
         usage = response.usage_metadata
@@ -258,26 +247,10 @@ def spec_reviewer_router(state: SharedState) -> str:
         return "__end__"
     
     elif resulting_phase == "QUESTIONS_PENDING":
-        # Questions pending - check if they have answers
-        open_questions = state.get('open_questions', [])
-        
-        # Check structured questions first
-        if open_questions and all_questions_answered(open_questions):
-            # All questions answered - return to spec_planner
-            if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
-                return "spec_planner"
-        
-        # Fallback: check clarifications file format
-        feature_name = state.get('feature_name')
-        spec_path = state.get('spec_path', 'spec/')
-        if feature_name:
-            clarifications = read_spec_file(feature_name, 'clarifications', spec_path)
-            if clarifications and "## Answers" in clarifications:
-                if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
-                    return "spec_planner"  # Re-run planner with answers
-        
-        # Still pending questions - wait for user
-        return "__end__"
+        # Questions pending - route to question_generator to create questions.md
+        # question_generator will create the questions.md file and set phase back to QUESTIONS_PENDING
+        print(f"[Spec Reviewer Router] Questions pending. Routing to question_generator")
+        return "question_generator"
     
     elif resulting_phase == "SPEC_DRAFT":
         # Needs revision - return to spec_planner

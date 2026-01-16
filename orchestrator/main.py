@@ -10,6 +10,9 @@ from langgraph.graph import StateGraph, END
 from orchestrator.state import SharedState
 from orchestrator.nodes.spec_planner_node import spec_planner_node, spec_planner_router
 from orchestrator.nodes.spec_reviewer_node import spec_reviewer_node, spec_reviewer_router
+from orchestrator.nodes.question_generator_node import question_generator_node, question_generator_router
+from orchestrator.nodes.answer_parser_node import answer_parser_node, answer_parser_router
+from orchestrator.nodes.spec_updater_node import spec_updater_node, spec_updater_router
 from orchestrator.nodes.supervisor_node import supervisor_node, supervisor_router
 from orchestrator.nodes.dispatcher_node import dispatcher_node
 from orchestrator.nodes.worker_node import worker_node
@@ -31,6 +34,9 @@ def build_graph():
     # Spec-feature nodes
     workflow.add_node("spec_planner", spec_planner_node)
     workflow.add_node("spec_reviewer", spec_reviewer_node)
+    workflow.add_node("question_generator", question_generator_node)
+    workflow.add_node("answer_parser", answer_parser_node)
+    workflow.add_node("spec_updater", spec_updater_node)
     workflow.add_node("final_validator", final_validator_node)
     def user_notification_node(state: SharedState) -> SharedState:
         """User notification node - calls notify_user and returns empty state."""
@@ -66,6 +72,7 @@ def build_graph():
         {
             "spec_reviewer": "spec_reviewer",
             "supervisor": "supervisor",  # For RUN_TASKS intent (EXEC_PLANNED phase)
+            "answer_parser": "answer_parser",  # When answering questions in QUESTIONS_PENDING
             "__end__": END
         }
     )
@@ -77,6 +84,36 @@ def build_graph():
         {
             "supervisor": "supervisor",
             "spec_planner": "spec_planner",  # Loop back if needs revision
+            "question_generator": "question_generator",  # Generate questions if needed
+            "__end__": END
+        }
+    )
+    
+    # Conditional Edge from Question Generator
+    workflow.add_conditional_edges(
+        "question_generator",
+        question_generator_router,
+        {
+            "__end__": END
+        }
+    )
+    
+    # Conditional Edge from Answer Parser
+    workflow.add_conditional_edges(
+        "answer_parser",
+        answer_parser_router,
+        {
+            "spec_updater": "spec_updater",  # All questions answered - update specs
+            "__end__": END
+        }
+    )
+    
+    # Conditional Edge from Spec Updater
+    workflow.add_conditional_edges(
+        "spec_updater",
+        spec_updater_router,
+        {
+            "spec_reviewer": "spec_reviewer",  # Re-review after update
             "__end__": END
         }
     )

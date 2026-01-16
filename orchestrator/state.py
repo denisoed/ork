@@ -292,6 +292,20 @@ def all_questions_answered(questions: Optional[List[Dict[str, Any]]]) -> bool:
     return all(q.get("status") == "answered" for q in questions)
 
 
+def has_open_questions(state: SharedState) -> bool:
+    """
+    Check if there are any open questions blocking development.
+    
+    Args:
+        state: SharedState to check
+        
+    Returns:
+        True if there are open questions, False otherwise
+    """
+    open_questions = state.get('open_questions', [])
+    return any(q.get("status") == "open" for q in open_questions)
+
+
 def add_evidence(
     evidence_list: List[Dict[str, Any]],
     evidence_type: str,

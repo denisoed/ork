@@ -260,7 +260,7 @@ def spec_planner_router(state: SharedState) -> str:
     """
     Router for spec planner - determines next step based on phase.
     """
-    from orchestrator.state import can_enter_node, is_valid_transition
+    from orchestrator.state import can_enter_node, is_valid_transition, has_open_questions
     
     current_phase = state.get('phase', 'INTAKE')
     
@@ -269,8 +269,15 @@ def spec_planner_router(state: SharedState) -> str:
         print(f"[Spec Planner Router] Illegal transition from phase {current_phase} to spec_planner")
         return "__end__"
     
-    # If RUN_TASKS intent was processed, go to supervisor
+    # If RUN_TASKS intent was processed, check for open questions (BLOCKING)
     if current_phase == "EXEC_PLANNED":
+        # HARD RULE: Block transition to development if there are open questions
+        if has_open_questions(state):
+            open_questions = state.get('open_questions', [])
+            open_count = len([q for q in open_questions if q.get("status") == "open"])
+            print(f"[Spec Planner Router] BLOCKED: Cannot proceed to development with {open_count} open question(s)")
+            return "__end__"  # BLOCKED - cannot transition to development
+        
         feature_name = state.get('feature_name')
         if feature_name:
             print(f"[Spec Planner Router] EXEC_PLANNED phase detected. Routing to supervisor for feature: {feature_name}")
@@ -278,29 +285,16 @@ def spec_planner_router(state: SharedState) -> str:
                 return "supervisor"
         return "__end__"
     
-    # If questions are pending, check if they have been answered
+    # If questions are pending, route to answer_parser to process user answers
     if current_phase == "QUESTIONS_PENDING":
-        # Check if clarifications exist and have answers
-        feature_name = state.get('feature_name')
-        spec_path = state.get('spec_path', 'spec/')
-        open_questions = state.get('open_questions', [])
+        # Check if there's a new user message (user is answering questions)
+        messages = state.get('messages', [])
+        if messages:
+            # Route to answer_parser to process the answers
+            print(f"[Spec Planner Router] Questions pending. Routing to answer_parser to process user answers.")
+            return "answer_parser"
         
-        # Check structured questions first
-        if open_questions and all_questions_answered(open_questions):
-            # All questions answered - can proceed
-            if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
-                return "spec_planner"  # Re-run planner with answers
-        
-        # Fallback: check clarifications file format
-        if feature_name:
-            clarifications = read_spec_file(feature_name, 'clarifications', spec_path)
-            if clarifications and "## Answers" in clarifications:
-                if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
-                    return "spec_planner"  # Re-run planner with answers
-            elif clarifications:
-                return "__end__"  # Wait for user to answer questions
-        
-        # Still pending questions
+        # No new messages - wait for user to answer
         return "__end__"
     
     # After creating specs (SPEC_DRAFT), go to reviewer

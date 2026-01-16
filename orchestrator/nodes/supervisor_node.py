@@ -340,7 +340,7 @@ def supervisor_router(state: SharedState) -> str:
     Returns a single role string for the conditional edge.
     Checks phase before allowing transitions.
     """
-    from orchestrator.state import can_enter_node, is_valid_transition
+    from orchestrator.state import can_enter_node, is_valid_transition, has_open_questions
     
     # Check phase
     current_phase = state.get('phase', 'INTAKE')
@@ -349,6 +349,14 @@ def supervisor_router(state: SharedState) -> str:
     if not can_enter_node("supervisor", current_phase):
         print(f"[Supervisor Router] Illegal transition from phase {current_phase} to supervisor")
         return "__end__"
+    
+    # Additional check: block development if there are open questions
+    if current_phase in ["EXEC_PLANNED", "EXECUTING", "IMPL_REVIEW"]:
+        if has_open_questions(state):
+            open_questions = state.get('open_questions', [])
+            open_count = len([q for q in open_questions if q.get("status") == "open"])
+            print(f"[Supervisor Router] BLOCKED: Cannot proceed to development with {open_count} open question(s)")
+            return "__end__"  # BLOCKED - cannot proceed with open questions
     
     # Check recursion limit
     if state.get('recursion_depth', 0) >= MAX_RECURSION_DEPTH:

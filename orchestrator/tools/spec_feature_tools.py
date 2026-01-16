@@ -198,7 +198,7 @@ def read_spec_file(feature_name: str, file_type: str, spec_path: Optional[str] =
     
     Args:
         feature_name: Name of the feature
-        file_type: Type of file ('spec', 'plan', 'tasks', 'clarifications', 'verify-report')
+        file_type: Type of file ('spec', 'plan', 'tasks', 'clarifications', 'questions', 'verify-report')
         spec_path: Optional custom path to spec directory
         
     Returns:
@@ -212,6 +212,7 @@ def read_spec_file(feature_name: str, file_type: str, spec_path: Optional[str] =
         'plan': 'plan.md',
         'tasks': 'tasks.md',
         'clarifications': 'clarifications.md',
+        'questions': 'questions.md',
         'verify-report': 'verify-report.md',
     }
     
@@ -235,7 +236,7 @@ def write_spec_file(feature_name: str, file_type: str, content: str, spec_path: 
     
     Args:
         feature_name: Name of the feature
-        file_type: Type of file ('spec', 'plan', 'tasks', 'clarifications', 'verify-report')
+        file_type: Type of file ('spec', 'plan', 'tasks', 'clarifications', 'questions', 'verify-report')
         content: Content to write
         spec_path: Optional custom path to spec directory
         
@@ -254,6 +255,7 @@ def write_spec_file(feature_name: str, file_type: str, content: str, spec_path: 
         'plan': 'plan.md',
         'tasks': 'tasks.md',
         'clarifications': 'clarifications.md',
+        'questions': 'questions.md',
         'verify-report': 'verify-report.md',
     }
     
@@ -312,6 +314,7 @@ def check_spec_structure(feature_name: str, spec_path: Optional[str] = None) -> 
         'plan': (feature_dir / "plan.md").exists(),
         'tasks': (feature_dir / "tasks.md").exists(),
         'clarifications': (feature_dir / "clarifications.md").exists(),
+        'questions': (feature_dir / "questions.md").exists(),
         'verify-report': (feature_dir / "verify-report.md").exists(),
     }
     
