@@ -5,7 +5,7 @@ Handles reading/writing spec files, templates, and constitution.
 
 import os
 import re
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Any
 from pathlib import Path
 
 # Get project root (parent of orchestrator directory)
@@ -214,6 +214,9 @@ def read_spec_file(feature_name: str, file_type: str, spec_path: Optional[str] =
         'clarifications': 'clarifications.md',
         'questions': 'questions.md',
         'verify-report': 'verify-report.md',
+        'summary': 'summary.md',
+        'validation-report': 'validation_report.md',
+        'risks-debt': 'risks_debt.md',
     }
     
     filename = file_map.get(file_type, f"{file_type}.md")
@@ -257,6 +260,9 @@ def write_spec_file(feature_name: str, file_type: str, content: str, spec_path: 
         'clarifications': 'clarifications.md',
         'questions': 'questions.md',
         'verify-report': 'verify-report.md',
+        'summary': 'summary.md',
+        'validation-report': 'validation_report.md',
+        'risks-debt': 'risks_debt.md',
     }
     
     filename = file_map.get(file_type, f"{file_type}.md")
@@ -316,6 +322,65 @@ def check_spec_structure(feature_name: str, spec_path: Optional[str] = None) -> 
         'clarifications': (feature_dir / "clarifications.md").exists(),
         'questions': (feature_dir / "questions.md").exists(),
         'verify-report': (feature_dir / "verify-report.md").exists(),
+        'trace': (feature_dir / "trace.json").exists(),
     }
     
     return files
+
+
+def read_trace_json(feature_name: str, spec_path: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """
+    Read trace.json file from spec/features/<feature-name>/.
+    
+    Args:
+        feature_name: Name of the feature
+        spec_path: Optional custom path to spec directory
+        
+    Returns:
+        List of trace records, or None if file doesn't exist or is invalid
+    """
+    import json
+    
+    spec_dir = get_spec_path(spec_path)
+    trace_file = spec_dir / "features" / feature_name / "trace.json"
+    
+    if not trace_file.exists():
+        return None
+    
+    try:
+        with open(trace_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"Error reading trace.json: {e}")
+        return None
+
+
+def write_trace_json(feature_name: str, trace_data: List[Dict[str, Any]], spec_path: Optional[str] = None) -> bool:
+    """
+    Write trace.json file to spec/features/<feature-name>/.
+    
+    Args:
+        feature_name: Name of the feature
+        trace_data: List of trace records (each with req_id, implementation, verification, evidence, status)
+        spec_path: Optional custom path to spec directory
+        
+    Returns:
+        True if successful
+    """
+    import json
+    
+    spec_dir = get_spec_path(spec_path)
+    
+    # Ensure feature directory exists
+    if not ensure_feature_directory(feature_name, spec_path):
+        return False
+    
+    trace_file = spec_dir / "features" / feature_name / "trace.json"
+    
+    try:
+        with open(trace_file, "w", encoding="utf-8") as f:
+            json.dump(trace_data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Error writing trace.json: {e}")
+        return False

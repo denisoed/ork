@@ -6,7 +6,7 @@ import os
 import time
 import json
 from datetime import datetime
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Tuple, List
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from orchestrator.state import (
@@ -20,6 +20,10 @@ from orchestrator.tools.spec_feature_tools import (
     read_template_file,
     read_spec_file,
     write_spec_file,
+    read_trace_json,
+    write_trace_json,
+    get_spec_path,
+    ensure_feature_directory,
 )
 from orchestrator.tools.shell_tools import run_shell_command
 from orchestrator.tools.fs_tools import WORKSPACE_DIR, list_files
@@ -393,6 +397,421 @@ def _get_workspace_files_summary() -> str:
     except Exception:
         return "Could not list files"
 
+
+def _extract_req_ids_from_spec(spec_content: str) -> List[str]:
+    """Extract requirement IDs (REQ-XXX) from spec.md content."""
+    import re
+    req_pattern = r'REQ-(\d+)'
+    matches = re.findall(req_pattern, spec_content)
+    # Return unique sorted requirement IDs
+    req_ids = sorted(set([f"REQ-{match.zfill(3)}" for match in matches]))
+    return req_ids
+
+
+def _get_implemented_files(feature_name: str, tasks_content: str, workspace_files: str) -> List[str]:
+    """Extract list of implemented files from tasks and workspace."""
+    # Try to extract file paths from tasks.md (tasks usually reference files)
+    implemented = []
+    
+    # Look for file paths in tasks
+    import re
+    # Common patterns: `path/to/file`, "path/to/file", path/to/file.py
+    file_patterns = [
+        r'`([^`\s]+\.(py|js|ts|jsx|tsx|md|json|yaml|yml))`',
+        r'"([^"\s]+\.(py|js|ts|jsx|tsx|md|json|yaml|yml))"',
+        r'(\S+\.(py|js|ts|jsx|tsx|md|json|yaml|yml))',
+    ]
+    
+    found_files = set()
+    for pattern in file_patterns:
+        matches = re.findall(pattern, tasks_content)
+        for match in matches:
+            if isinstance(match, tuple):
+                found_files.add(match[0])
+            else:
+                found_files.add(match)
+    
+    # Also check workspace files (limit to source/test files, not artifacts)
+    workspace_file_list = workspace_files.split("\n")
+    for file_path in workspace_file_list[:100]:  # Limit check
+        if any(file_path.endswith(ext) for ext in ['.py', '.js', '.ts', '.tsx', '.jsx']):
+            if 'artifacts' not in file_path and 'node_modules' not in file_path:
+                found_files.add(file_path.strip())
+    
+    return sorted(list(found_files))
+
+
+def _generate_summary_md(
+    feature_name: str,
+    spec_path: str,
+    tasks_content: str,
+    workspace_files: str,
+    validation_results: Dict[str, Any]
+) -> str:
+    """Generate summary.md with what was done and where."""
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    
+    # Extract implemented files
+    implemented_files = _get_implemented_files(feature_name, tasks_content, workspace_files)
+    
+    # Extract completed tasks from tasks.md
+    completed_tasks = []
+    import re
+    task_pattern = r'- \[x\]\s+(.+?)(?:\n|$)'
+    matches = re.findall(task_pattern, tasks_content, re.MULTILINE)
+    completed_tasks = [task.strip() for task in matches]
+    
+    summary_lines = [
+        f"# Summary - {feature_name}",
+        "",
+        f"**Date:** {date_str}",
+        "",
+        "## What was done",
+        "",
+        "### Implemented Components"
+    ]
+    
+    if implemented_files:
+        for file_path in implemented_files[:50]:  # Limit to 50 files
+            summary_lines.append(f"- `{file_path}`")
+    else:
+        summary_lines.append("- No files explicitly listed")
+    
+    summary_lines.extend([
+        "",
+        "### Tasks Completed"
+    ])
+    
+    if completed_tasks:
+        for task in completed_tasks[:20]:  # Limit to 20 tasks
+            summary_lines.append(f"- [x] {task}")
+    else:
+        summary_lines.append("- No completed tasks found")
+    
+    summary_lines.extend([
+        "",
+        "### Files Created/Modified",
+        ""
+    ])
+    
+    if implemented_files:
+        for file_path in implemented_files:
+            summary_lines.append(f"- `{file_path}`")
+    else:
+        summary_lines.append("- No files identified")
+    
+    # Add validation summary
+    summary_lines.extend([
+        "",
+        "### Validation Status",
+        ""
+    ])
+    
+    if validation_results.get('build', {}).get('ran'):
+        status = "✅ passed" if validation_results['build'].get('passed') else "❌ failed"
+        summary_lines.append(f"- Build: {status}")
+    
+    if validation_results.get('tests', {}).get('ran'):
+        status = "✅ passed" if validation_results['tests'].get('passed') else "❌ failed"
+        summary_lines.append(f"- Tests: {status}")
+    
+    if validation_results.get('service', {}).get('healthcheck', {}).get('checked'):
+        status = "✅ passed" if validation_results['service']['healthcheck'].get('passed') else "❌ failed"
+        summary_lines.append(f"- Healthcheck: {status}")
+    
+    return "\n".join(summary_lines)
+
+
+def _generate_validation_report_md(
+    feature_name: str,
+    validation_results: Dict[str, Any],
+    project_root: str
+) -> str:
+    """Generate validation_report.md with commands, statuses, and log links."""
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    validation_dir = ensure_artifacts_dir(project_root)
+    
+    report_lines = [
+        f"# Validation Report - {feature_name}",
+        "",
+        f"**Date:** {date_str}",
+        "",
+        "## Build Commands"
+    ]
+    
+    build = validation_results.get('build', {})
+    if build.get('ran'):
+        logs = build.get('logs', [])
+        for i, log_path in enumerate(logs):
+            status = "✅ passed" if build.get('passed') else "❌ failed"
+            # Convert absolute path to relative
+            rel_log_path = os.path.relpath(log_path, project_root) if os.path.isabs(log_path) else log_path
+            report_lines.extend([
+                f"- Command: Build #{i+1}",
+                f"  - Status: {status}",
+                f"  - Log: `{rel_log_path}`"
+            ])
+    else:
+        report_lines.append("- No build commands executed")
+    
+    report_lines.extend([
+        "",
+        "## Test Commands"
+    ])
+    
+    tests = validation_results.get('tests', {})
+    if tests.get('ran'):
+        logs = tests.get('logs', [])
+        for i, log_path in enumerate(logs):
+            status = "✅ passed" if tests.get('passed') else "❌ failed"
+            rel_log_path = os.path.relpath(log_path, project_root) if os.path.isabs(log_path) else log_path
+            report_lines.extend([
+                f"- Command: Test #{i+1}",
+                f"  - Status: {status}",
+                f"  - Log: `{rel_log_path}`"
+            ])
+    else:
+        report_lines.append("- No test commands executed")
+    
+    report_lines.extend([
+        "",
+        "## Healthcheck"
+    ])
+    
+    service = validation_results.get('service', {})
+    healthcheck = service.get('healthcheck', {})
+    if healthcheck.get('checked'):
+        status = "✅ passed" if healthcheck.get('passed') else "❌ failed"
+        hc_output = healthcheck.get('output', '')
+        report_lines.extend([
+            f"- Status: {status}",
+            f"- Output: {hc_output[:200]}"
+        ])
+    else:
+        report_lines.append("- Healthcheck not executed")
+    
+    report_lines.extend([
+        "",
+        "## Validation Summary"
+    ])
+    
+    # Count commands
+    total_commands = 0
+    passed_commands = 0
+    failed_commands = 0
+    
+    if build.get('ran'):
+        total_commands += 1
+        if build.get('passed'):
+            passed_commands += 1
+        else:
+            failed_commands += 1
+    
+    if tests.get('ran'):
+        total_commands += 1
+        if tests.get('passed'):
+            passed_commands += 1
+        else:
+            failed_commands += 1
+    
+    if healthcheck.get('checked'):
+        total_commands += 1
+        if healthcheck.get('passed'):
+            passed_commands += 1
+        else:
+            failed_commands += 1
+    
+    rel_validation_dir = os.path.relpath(validation_dir, project_root) if os.path.isabs(validation_dir) else validation_dir
+    
+    report_lines.extend([
+        f"- Total commands: {total_commands}",
+        f"- Passed: {passed_commands}",
+        f"- Failed: {failed_commands}",
+        f"- Logs directory: `{rel_validation_dir}/`"
+    ])
+    
+    return "\n".join(report_lines)
+
+
+def _generate_trace_md(feature_name: str, spec_path: str, spec_content: str) -> str:
+    """Generate trace.md (readable version of trace.json)."""
+    trace_data = read_trace_json(feature_name, spec_path)
+    
+    md_lines = [
+        f"# Requirement Traceability - {feature_name}",
+        "",
+        "| REQ ID | Implementation | Verification | Evidence | Status |",
+        "|--------|----------------|--------------|----------|--------|"
+    ]
+    
+    if trace_data:
+        for record in trace_data:
+            req_id = record.get('req_id', '')
+            impl = record.get('implementation', [])
+            verification = record.get('verification', '')
+            evidence = record.get('evidence', '')
+            status = record.get('status', 'unknown')
+            
+            # Format implementation files
+            impl_str = ', '.join([f"`{f}`" for f in impl[:3]])  # Limit to 3 files
+            if len(impl) > 3:
+                impl_str += f" ... (+{len(impl) - 3} more)"
+            if not impl_str:
+                impl_str = "-"
+            
+            # Format verification
+            verification_str = verification[:50] + "..." if len(verification) > 50 else verification
+            if not verification_str:
+                verification_str = "-"
+            
+            # Format evidence
+            evidence_str = f"`{evidence}`" if evidence else "-"
+            
+            # Format status with emoji
+            status_emoji = "✅" if status == "pass" else "❌" if status == "fail" else "⚠️"
+            status_str = f"{status_emoji} {status}"
+            
+            md_lines.append(f"| {req_id} | {impl_str} | {verification_str} | {evidence_str} | {status_str} |")
+    else:
+        md_lines.append("| - | No trace data available | - | - | - |")
+    
+    return "\n".join(md_lines)
+
+
+def _generate_risks_debt_md(
+    feature_name: str,
+    validation_result: Dict[str, Any],
+    validation_results: Dict[str, Any]
+) -> str:
+    """Generate risks_debt.md with risks and technical debt."""
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    
+    md_lines = [
+        f"# Risks and Technical Debt - {feature_name}",
+        "",
+        f"**Date:** {date_str}",
+        "",
+        "## Risks"
+    ]
+    
+    issues = validation_result.get('issues', [])
+    if issues:
+        for i, issue in enumerate(issues, 1):
+            md_lines.append(f"{i}. {issue}")
+    else:
+        md_lines.append("- No risks identified")
+    
+    md_lines.extend([
+        "",
+        "## Technical Debt"
+    ])
+    
+    # Extract debt from validation issues
+    debt_items = []
+    for issue in issues:
+        if any(keyword in issue.lower() for keyword in ['debt', 'todo', 'fixme', 'hack', 'temporary']):
+            debt_items.append(issue)
+    
+    if debt_items:
+        for item in debt_items:
+            md_lines.append(f"- {item}")
+    else:
+        md_lines.append("- No technical debt identified")
+    
+    # Add failed validations as potential debt
+    md_lines.extend([
+        "",
+        "## Failed Validations"
+    ])
+    
+    failed_items = []
+    if validation_results.get('build', {}).get('ran') and not validation_results.get('build', {}).get('passed'):
+        failed_items.append("Build commands failed")
+    if validation_results.get('tests', {}).get('ran') and not validation_results.get('tests', {}).get('passed'):
+        failed_items.append("Test commands failed")
+    if validation_results.get('service', {}).get('healthcheck', {}).get('checked') and not validation_results.get('service', {}).get('healthcheck', {}).get('passed'):
+        failed_items.append("Healthcheck failed")
+    
+    if failed_items:
+        for item in failed_items:
+            md_lines.append(f"- {item}")
+    else:
+        md_lines.append("- All validations passed")
+    
+    return "\n".join(md_lines)
+
+
+def _check_evidence_completeness(
+    feature_name: str,
+    spec_path: str,
+    spec_content: str,
+    validation_results: Dict[str, Any],
+    project_root: str
+) -> Tuple[bool, List[str]]:
+    """
+    Check if all required evidence is present.
+    
+    Returns:
+        Tuple of (is_complete, list_of_missing_evidence)
+    """
+    missing_evidence = []
+    
+    # 1. Check trace.json exists and is valid
+    trace_data = read_trace_json(feature_name, spec_path)
+    if trace_data is None:
+        missing_evidence.append("trace.json file is missing or invalid")
+        # Can't continue without trace.json
+        return False, missing_evidence
+    
+    # 2. Check all REQ from spec.md are in trace.json
+    req_ids_from_spec = set(_extract_req_ids_from_spec(spec_content))
+    req_ids_from_trace = set([r.get('req_id') for r in trace_data if r.get('req_id')])
+    
+    missing_reqs = req_ids_from_spec - req_ids_from_trace
+    if missing_reqs:
+        missing_evidence.append(f"Missing requirements in trace.json: {', '.join(sorted(missing_reqs))}")
+    
+    # 3. Check no unknown statuses
+    unknown_reqs = [r.get('req_id') for r in trace_data if r.get('status') == 'unknown']
+    if unknown_reqs:
+        missing_evidence.append(f"Requirements with unknown status: {', '.join(unknown_reqs)}")
+    
+    # 4. Check all pass statuses have evidence
+    pass_reqs_without_evidence = [
+        r.get('req_id') for r in trace_data
+        if r.get('status') == 'pass' and not r.get('evidence')
+    ]
+    if pass_reqs_without_evidence:
+        missing_evidence.append(f"Requirements with pass status but no evidence: {', '.join(pass_reqs_without_evidence)}")
+    
+    # 5. Check evidence files exist
+    for record in trace_data:
+        evidence = record.get('evidence', '')
+        if evidence and record.get('status') == 'pass':
+            # Check if file exists (can be relative to project root)
+            evidence_path = os.path.join(project_root, evidence) if not os.path.isabs(evidence) else evidence
+            if not os.path.exists(evidence_path):
+                missing_evidence.append(f"Evidence file does not exist: {evidence} (for {record.get('req_id')})")
+    
+    # 6. Check validation logs exist
+    validation_dir = ensure_artifacts_dir(project_root)
+    build_logs = validation_results.get('build', {}).get('logs', [])
+    test_logs = validation_results.get('tests', {}).get('logs', [])
+    
+    all_logs = build_logs + test_logs
+    for log_path in all_logs:
+        if not os.path.exists(log_path):
+            missing_evidence.append(f"Validation log does not exist: {log_path}")
+    
+    # If validation was run, there should be at least some logs
+    if validation_results.get('build', {}).get('ran') and not build_logs:
+        missing_evidence.append("Build commands were run but no logs found")
+    if validation_results.get('tests', {}).get('ran') and not test_logs:
+        missing_evidence.append("Test commands were run but no logs found")
+    
+    is_complete = len(missing_evidence) == 0
+    return is_complete, missing_evidence
+
 def final_validator_node(state: SharedState) -> SharedState:
     """
     Final Validator Node - validates implementation and creates verify-report.md.
@@ -623,6 +1042,67 @@ Status: {validation_result.get('status', 'unknown')}
         # Write verify-report.md
         write_spec_file(feature_name, "verify-report", verify_report_content, spec_path)
         
+        # Generate acceptance package documents
+        print(f"[Final Validator] Generating acceptance package documents...")
+        
+        # Generate summary.md
+        summary_content = _generate_summary_md(
+            feature_name, spec_path, tasks_content, workspace_files, validation_results
+        )
+        write_spec_file(feature_name, "summary", summary_content, spec_path)
+        print(f"[Final Validator] Generated summary.md")
+        
+        # Generate validation_report.md
+        validation_report_content = _generate_validation_report_md(
+            feature_name, validation_results, WORKSPACE_DIR
+        )
+        write_spec_file(feature_name, "validation-report", validation_report_content, spec_path)
+        print(f"[Final Validator] Generated validation_report.md")
+        
+        # Generate trace.md (readable version)
+        trace_md_content = _generate_trace_md(feature_name, spec_path, spec_content)
+        # Use custom write for trace.md (not in standard file_map)
+        spec_dir = get_spec_path(spec_path)
+        ensure_feature_directory(feature_name, spec_path)
+        trace_md_path = spec_dir / "features" / feature_name / "trace.md"
+        try:
+            with open(trace_md_path, "w", encoding="utf-8") as f:
+                f.write(trace_md_content)
+            print(f"[Final Validator] Generated trace.md")
+        except Exception as e:
+            print(f"[Final Validator] Warning: Could not write trace.md: {e}")
+        
+        # Generate risks_debt.md
+        risks_debt_content = _generate_risks_debt_md(
+            feature_name, validation_result, validation_results
+        )
+        write_spec_file(feature_name, "risks-debt", risks_debt_content, spec_path)
+        print(f"[Final Validator] Generated risks_debt.md")
+        
+        # Add deployment URLs and healthcheck info to verify-report if available
+        deployment_urls = state.get('deployment_urls', {})
+        if deployment_urls:
+            deployment_section = "\n\n## Deployment\n\n"
+            for deploy_type, url in deployment_urls.items():
+                if url:
+                    deployment_section += f"- {deploy_type}: {url}\n"
+            
+            healthcheck = validation_results.get('service', {}).get('healthcheck', {})
+            if healthcheck.get('checked'):
+                hc_status = "✅ passed" if healthcheck.get('passed') else "❌ failed"
+                deployment_section += f"- Healthcheck: {hc_status}\n"
+                if healthcheck.get('output'):
+                    deployment_section += f"  - Output: {healthcheck.get('output')[:200]}\n"
+            
+            verify_report_content += deployment_section
+            write_spec_file(feature_name, "verify-report", verify_report_content, spec_path)
+        
+        # Check evidence completeness BEFORE setting DONE
+        print(f"[Final Validator] Checking evidence completeness...")
+        evidence_complete, missing_evidence = _check_evidence_completeness(
+            feature_name, spec_path, spec_content, validation_results, WORKSPACE_DIR
+        )
+        
         # Extract usage
         usage = response.usage_metadata
         token_update = {
@@ -633,25 +1113,45 @@ Status: {validation_result.get('status', 'unknown')}
         
         validation_status = validation_result.get('status', 'failed')
         print(f"[Final Validator] Validation status: {validation_status}")
+        print(f"[Final Validator] Evidence completeness: {'✅ Complete' if evidence_complete else '❌ Incomplete'}")
         
-        # Determine phase based on validation status
-        if validation_status == "passed":
-            # Validation passed - move to TRACE_VALIDATION, then DONE
-            new_phase = "TRACE_VALIDATION"
-            # After trace validation (which is done here), set to DONE
-            # Actually, we'll set DONE immediately after TRACE_VALIDATION in this node
-            # But let's set TRACE_VALIDATION first, then transition to DONE
-            if is_valid_transition("VALIDATING", "TRACE_VALIDATION"):
-                # Set to TRACE_VALIDATION, then immediately to DONE if all checks pass
-                new_phase = "DONE"
+        # Update verify-report with evidence check results
+        if not evidence_complete:
+            evidence_section = "\n\n## Evidence Completeness Check\n\n"
+            evidence_section += "❌ **BLOCKED: Missing evidence required for DONE status**\n\n"
+            evidence_section += "Missing evidence:\n"
+            for missing in missing_evidence:
+                evidence_section += f"- {missing}\n"
+            verify_report_content += evidence_section
+            write_spec_file(feature_name, "verify-report", verify_report_content, spec_path)
+        
+        # Determine phase based on validation status AND evidence completeness
+        if validation_status == "passed" and evidence_complete:
+            # Validation passed AND evidence is complete - can set to DONE
+            new_phase = "DONE"
+            final_status = "passed"
+            print(f"[Final Validator] All checks passed, setting phase to DONE")
+        elif validation_status == "passed" and not evidence_complete:
+            # Validation passed but evidence incomplete - BLOCK DONE
+            new_phase = "FAILED"
+            final_status = "failed"
+            print(f"[Final Validator] Validation passed but evidence incomplete - BLOCKING DONE")
+            missing_evidence_str = "; ".join(missing_evidence[:5])  # Limit to 5 items
+            if len(missing_evidence) > 5:
+                missing_evidence_str += f" ... and {len(missing_evidence) - 5} more"
+            validation_result['summary'] = f"Evidence incomplete: {missing_evidence_str}"
+            validation_result['status'] = 'failed'
+            validation_result['issues'] = validation_result.get('issues', []) + missing_evidence
         else:
             # Validation failed
             new_phase = "FAILED"
+            final_status = validation_status
+            print(f"[Final Validator] Validation failed, setting phase to FAILED")
         
         return {
             "phase": new_phase,
             "final_validation_report": {
-                "status": validation_status,
+                "status": final_status,
                 "spec_compliance": validation_result.get('spec_compliance', False),
                 "plan_compliance": validation_result.get('plan_compliance', False),
                 "tasks_completed": validation_result.get('tasks_completed', False),
