@@ -11,6 +11,18 @@ from orchestrator.tools.deploy_tools import (
     init_supabase_project,
     get_deployment_status
 )
+from orchestrator.tools.project_profile_tools import (
+    load_project_profile,
+    has_project_profile,
+    is_service_project
+)
+from orchestrator.tools.validation_artifacts import (
+    ensure_artifacts_dir,
+    save_command_log,
+    save_validation_summary,
+    append_validation_log,
+    get_validation_summary
+)
 
 __all__ = [
     # File system tools
@@ -31,5 +43,17 @@ __all__ = [
     'link_vercel_project',
     'link_supabase_project',
     'init_supabase_project',
-    'get_deployment_status'
+    'get_deployment_status',
+    
+    # Project profile tools
+    'load_project_profile',
+    'has_project_profile',
+    'is_service_project',
+    
+    # Validation artifacts tools
+    'ensure_artifacts_dir',
+    'save_command_log',
+    'save_validation_summary',
+    'append_validation_log',
+    'get_validation_summary'
 ]

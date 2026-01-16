@@ -5,6 +5,15 @@ from orchestrator.state import SharedState, add_evidence, update_evidence_status
 from orchestrator.tools.shell_tools import run_shell_command
 from orchestrator.tools.fs_tools import WORKSPACE_DIR
 from orchestrator.nodes.worker_node import get_current_task_id
+from orchestrator.tools.project_profile_tools import (
+    load_project_profile,
+    has_project_profile
+)
+from orchestrator.tools.validation_artifacts import (
+    ensure_artifacts_dir,
+    save_command_log,
+    append_validation_log
+)
 
 # Validation patterns for common errors
 SYNTAX_ERROR_PATTERNS = [
@@ -285,16 +294,46 @@ def validator_node(state: SharedState, role: str) -> SharedState:
 
     print(f"[Validator:{role}] Validating task: {target_task['id']}")
     
+    # Ensure artifacts directory exists
+    ensure_artifacts_dir(WORKSPACE_DIR)
+    append_validation_log(f"Validating task {target_task['id']} for role {role}", log_type="validation")
+    
     validation_passed = True
     error_messages = []
     deployment_urls = {}
+    
+    # Check if project profile exists and perform basic build check if available
+    if has_project_profile(WORKSPACE_DIR):
+        profile = load_project_profile(WORKSPACE_DIR)
+        if profile:
+            append_validation_log(f"Project profile found for task {target_task['id']}", log_type="validation")
+            
+            # Try to run build commands if available (quick check)
+            build_commands = profile.get('build_commands', [])
+            if build_commands and len(build_commands) > 0:
+                # Only run first build command as quick check
+                first_build_cmd = build_commands[0]
+                try:
+                    append_validation_log(f"Running quick build check: {first_build_cmd}", log_type="validation")
+                    build_result = run_shell_command(first_build_cmd, timeout=120)
+                    save_command_log(first_build_cmd, build_result, log_type="build_quick")
+                    
+                    # Check if build failed
+                    if "[EXIT CODE]" in build_result and "0" not in build_result:
+                        error_messages.append(f"Quick build check failed: {first_build_cmd}")
+                        validation_passed = False
+                except Exception as e:
+                    # Don't fail validation on build check error, just log it
+                    append_validation_log(f"Build check error (non-blocking): {e}", log_type="validation")
     
     # Check error logs for this task
     error_logs = state.get('error_logs', [])
     task_errors = [e for e in error_logs if e.get('task_id') == target_task['id']]
     if task_errors:
         validation_passed = False
-        error_messages.append(f"Worker reported errors: {task_errors[-1].get('error', 'Unknown')}")
+        error_msg = f"Worker reported errors: {task_errors[-1].get('error', 'Unknown')}"
+        error_messages.append(error_msg)
+        append_validation_log(f"Task errors found: {error_msg}", log_type="validation")
     
     # Role-specific validation
     if role == 'deploy_agent':
@@ -310,11 +349,20 @@ def validator_node(state: SharedState, role: str) -> SharedState:
     else:
         # Standard validation for other roles
         changed_files = _get_changed_files(state)
+        syntax_errors = []
         for filepath in changed_files:
             is_valid, error = _validate_syntax(filepath)
             if not is_valid:
                 validation_passed = False
                 error_messages.append(error)
+                syntax_errors.append(f"{filepath}: {error}")
+        
+        # Save syntax validation log
+        if syntax_errors:
+            syntax_log = "\n".join(syntax_errors)
+            save_command_log("syntax_validation", syntax_log, log_type="syntax")
+        elif changed_files:
+            save_command_log("syntax_validation", "All files passed syntax validation", log_type="syntax")
         
         if role == 'logic_agent':
             # Check Python files syntax
@@ -351,6 +399,7 @@ def validator_node(state: SharedState, role: str) -> SharedState:
         target_task['status'] = 'completed'
         target_task['feedback'] = "Validation passed"
         print(f"[Validator:{role}] Task {target_task['id']} PASSED validation")
+        append_validation_log(f"Task {target_task['id']} PASSED validation", log_type="validation")
         
         # Add evidence for validation
         add_evidence(
@@ -387,6 +436,11 @@ def validator_node(state: SharedState, role: str) -> SharedState:
         target_task['feedback'] = f"Validation failed (attempt {target_task['retry_count']}): {error_summary}"
         
         print(f"[Validator:{role}] Task {target_task['id']} FAILED validation: {error_summary}")
+        append_validation_log(f"Task {target_task['id']} FAILED validation: {error_summary}", log_type="validation")
+        
+        # Save validation failure log
+        failure_log = f"Task: {target_task['id']}\nErrors: {chr(10).join(error_messages)}"
+        save_command_log(f"validation_failure_{target_task['id']}", failure_log, log_type="validation")
         
         if target_task['retry_count'] >= 3:
             target_task['status'] = 'failed'
