@@ -124,6 +124,7 @@ def build_graph():
         supervisor_router,
         {
             "dispatcher": "dispatcher",
+            "supervisor": "supervisor",  # Loop back to supervisor (wait state for running/pending tasks)
             "human_intervention": END,
             "__end__": "final_validator"  # Go to final validator when all tasks done
         }

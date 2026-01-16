@@ -368,59 +368,78 @@ def supervisor_router(state: SharedState) -> str:
     if not tasks:
         return "__end__"
     
+    # Categorize tasks by status
     running_tasks = [t for t in tasks if t['status'] == 'running']
-
-    # Find pending tasks whose dependencies are met
-    completed_ids = {t['id'] for t in tasks if t['status'] == 'completed'}
-    failed_ids = {t['id'] for t in tasks if t['status'] == 'failed'}
+    pending_tasks = [t for t in tasks if t['status'] == 'pending']
+    completed_tasks = [t for t in tasks if t['status'] == 'completed']
+    failed_tasks = [t for t in tasks if t['status'] == 'failed']
     
-    # Check for failed tasks that exceeded retry limit
-    critical_failures = [t for t in tasks if t['status'] == 'failed' and t['retry_count'] >= 3]
+    completed_ids = {t['id'] for t in completed_tasks}
+    failed_ids = {t['id'] for t in failed_tasks}
+    
+    # Check for failed tasks that exceeded retry limit (critical failures)
+    critical_failures = [t for t in failed_tasks if t['retry_count'] >= 3]
     if critical_failures:
-        print(f"Critical failures detected: {[t['id'] for t in critical_failures]}")
+        print(f"[Supervisor Router] Critical failures detected: {[t['id'] for t in critical_failures]}")
         return "human_intervention"
     
+    # Find ready tasks (pending tasks with dependencies met) - check this FIRST
     ready_tasks = []
-    for t in tasks:
-        if t['status'] == 'pending':
-            # Check if all dependencies are completed
-            deps_met = all(d in completed_ids for d in t['dependencies'])
-            # Check if any dependency failed
-            deps_failed = any(d in failed_ids for d in t['dependencies'])
-            
-            if deps_failed:
-                # Mark task as failed due to dependency failure
-                continue
-                
-            if deps_met:
-                ready_tasks.append(t)
-    
-    if not ready_tasks:
-        # Check if ALL tasks are completed
-        if all(t['status'] == 'completed' for t in tasks):
-            print("All tasks completed successfully. Proceeding to final validation.")
-            # Check phase before going to final_validator
-            if current_phase == "EXECUTING" and is_valid_transition("EXECUTING", "VALIDATING"):
-                return "__end__"  # This will route to final_validator in main.py
-            elif current_phase not in ["EXECUTING", "IMPL_REVIEW"]:
-                print(f"[Supervisor Router] Cannot transition to final_validator from phase {current_phase}")
-                return "__end__"
+    for t in pending_tasks:
+        # Check if all dependencies are completed
+        deps_met = all(d in completed_ids for d in t['dependencies'])
+        # Check if any dependency failed
+        deps_failed = any(d in failed_ids for d in t['dependencies'])
         
-        if running_tasks:
+        if deps_failed:
+            # Task depends on failed task - skip it for now
+            continue
+            
+        if deps_met:
+            ready_tasks.append(t)
+    
+    # If we have ready tasks, route to dispatcher (highest priority)
+    if ready_tasks:
+        # Check phase before going to dispatcher
+        if not can_enter_node("dispatcher", current_phase):
+            print(f"[Supervisor Router] Cannot transition to dispatcher from phase {current_phase}")
             return "__end__"
         
-        # Check for deadlock (circular dependencies)
-        pending_tasks = [t for t in tasks if t['status'] == 'pending']
-        if pending_tasks:
-            print(f"Warning: {len(pending_tasks)} tasks pending but none ready. Possible circular dependency.")
-            return "human_intervention"
-            
-        return "__end__"
+        print(f"[Supervisor Router] Routing to dispatcher for {len(ready_tasks)} ready tasks")
+        return "dispatcher"
     
-    # Check phase before going to dispatcher
-    if not can_enter_node("dispatcher", current_phase):
-        print(f"[Supervisor Router] Cannot transition to dispatcher from phase {current_phase}")
-        return "__end__"
+    # No ready tasks - check states in priority order:
     
-    print(f"Routing to dispatcher for {len(ready_tasks)} ready tasks")
-    return "dispatcher"
+    # STATE 1: has_pending_or_running → wait/no-op (loop back to supervisor)
+    # This prevents premature transition to final_validator when tasks are still in progress
+    if running_tasks:
+        print(f"[Supervisor Router] Waiting: {len(running_tasks)} running task(s). Looping back to supervisor.")
+        return "supervisor"
+    
+    if pending_tasks:
+        # Some pending tasks but none are ready (dependencies not met or circular dependency)
+        print(f"[Supervisor Router] Waiting: {len(pending_tasks)} pending task(s) but none ready. Looping back to supervisor.")
+        return "supervisor"
+    
+    # STATE 2: any_failed (non-critical) → generate corrective tasks + back to EXECUTING
+    non_critical_failed = [t for t in failed_tasks if t['retry_count'] < 3]
+    if non_critical_failed:
+        print(f"[Supervisor Router] {len(non_critical_failed)} non-critical failed task(s) detected. Routing to supervisor for corrective tasks generation.")
+        return "supervisor"
+    
+    # STATE 3: all_completed → transition to IMPL_REVIEW/VALIDATING
+    # Only proceed if ALL tasks are completed (no running, pending, or failed)
+    if all(t['status'] == 'completed' for t in tasks):
+        print("[Supervisor Router] All tasks completed successfully. Proceeding to final validation.")
+        # Check phase before going to final_validator
+        if current_phase == "EXECUTING" and is_valid_transition("EXECUTING", "VALIDATING"):
+            return "__end__"  # This will route to final_validator in main.py
+        elif current_phase == "IMPL_REVIEW" and is_valid_transition("IMPL_REVIEW", "VALIDATING"):
+            return "__end__"
+        elif current_phase not in ["EXECUTING", "IMPL_REVIEW"]:
+            print(f"[Supervisor Router] Cannot transition to final_validator from phase {current_phase}")
+            return "__end__"
+    
+    # Fallback: no tasks to process or unexpected state
+    print(f"[Supervisor Router] Unexpected state: no ready tasks, no running/pending, no failed, not all completed. Ending.")
+    return "__end__"
