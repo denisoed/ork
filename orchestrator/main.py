@@ -16,6 +16,7 @@ from orchestrator.nodes.spec_updater_node import spec_updater_node, spec_updater
 from orchestrator.nodes.supervisor_node import supervisor_node, supervisor_router
 from orchestrator.nodes.dispatcher_node import dispatcher_node
 from orchestrator.nodes.worker_node import worker_node
+from orchestrator.nodes.impl_review_node import impl_review_node, impl_review_router
 from orchestrator.nodes.validator_node import validator_node
 from orchestrator.nodes.final_validator_node import final_validator_node
 from orchestrator.utils.notification import notify_user
@@ -54,6 +55,12 @@ def build_graph():
     workflow.add_node("db_agent", lambda s: worker_node(s, "db_agent"))
     workflow.add_node("logic_agent", lambda s: worker_node(s, "logic_agent"))
     workflow.add_node("deploy_agent", lambda s: worker_node(s, "deploy_agent"))
+    
+    # Implementation Review Nodes
+    workflow.add_node("impl_review_ui", lambda s: impl_review_node(s, "ui_agent"))
+    workflow.add_node("impl_review_db", lambda s: impl_review_node(s, "db_agent"))
+    workflow.add_node("impl_review_logic", lambda s: impl_review_node(s, "logic_agent"))
+    workflow.add_node("impl_review_deploy", lambda s: impl_review_node(s, "deploy_agent"))
     
     # Validator Nodes
     workflow.add_node("val_ui", lambda s: validator_node(s, "ui_agent"))
@@ -136,11 +143,45 @@ def build_graph():
     workflow.add_edge("dispatcher", "logic_agent")
     workflow.add_edge("dispatcher", "deploy_agent")
     
-    # Clean flow: Worker -> Validator
-    workflow.add_edge("ui_agent", "val_ui")
-    workflow.add_edge("db_agent", "val_db")
-    workflow.add_edge("logic_agent", "val_logic")
-    workflow.add_edge("deploy_agent", "val_deploy")
+    # Clean flow: Worker -> Implementation Review -> (Validator or Supervisor)
+    workflow.add_edge("ui_agent", "impl_review_ui")
+    workflow.add_edge("db_agent", "impl_review_db")
+    workflow.add_edge("logic_agent", "impl_review_logic")
+    workflow.add_edge("deploy_agent", "impl_review_deploy")
+    
+    # Implementation Review -> Validator or Supervisor (conditional)
+    workflow.add_conditional_edges(
+        "impl_review_ui",
+        lambda s: impl_review_router(s, "ui_agent"),
+        {
+            "val_ui": "val_ui",
+            "supervisor": "supervisor"
+        }
+    )
+    workflow.add_conditional_edges(
+        "impl_review_db",
+        lambda s: impl_review_router(s, "db_agent"),
+        {
+            "val_db": "val_db",
+            "supervisor": "supervisor"
+        }
+    )
+    workflow.add_conditional_edges(
+        "impl_review_logic",
+        lambda s: impl_review_router(s, "logic_agent"),
+        {
+            "val_logic": "val_logic",
+            "supervisor": "supervisor"
+        }
+    )
+    workflow.add_conditional_edges(
+        "impl_review_deploy",
+        lambda s: impl_review_router(s, "deploy_agent"),
+        {
+            "val_deploy": "val_deploy",
+            "supervisor": "supervisor"
+        }
+    )
     
     # Return from Validator to Supervisor (Loop)
     workflow.add_edge("val_ui", "supervisor")

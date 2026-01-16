@@ -420,8 +420,9 @@ def validator_node(state: SharedState, role: str) -> SharedState:
         result = {
             "tasks_queue": [target_task],
             "recursion_depth": state.get("recursion_depth", 0) + 1,
-            "evidence": evidence_list,
-            "phase": "IMPL_REVIEW"  # Set phase after validation
+            "evidence": evidence_list
+            # Phase is set by impl_review_node before validation (VALIDATING)
+            # No need to change phase here
         }
         
         # Add deployment URLs if extracted

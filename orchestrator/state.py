@@ -140,7 +140,9 @@ NODE_PHASES: Dict[str, List[str]] = {
     "spec_reviewer": ["SPEC_DRAFT"],
     "supervisor": ["SPEC_APPROVED", "EXEC_PLANNED", "EXECUTING", "IMPL_REVIEW"],
     "dispatcher": ["EXEC_PLANNED", "EXECUTING", "IMPL_REVIEW"],
-    "final_validator": ["EXECUTING"]
+    "impl_review": ["EXECUTING", "IMPL_REVIEW"],  # Can enter from EXECUTING phase
+    "validator": ["VALIDATING", "IMPL_REVIEW"],  # Can enter from VALIDATING phase (after impl_review)
+    "final_validator": ["EXECUTING", "VALIDATING"]
 }
 
 
