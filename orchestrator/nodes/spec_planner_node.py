@@ -8,7 +8,7 @@ import json
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState
+from orchestrator.state import SharedState, add_open_question, all_questions_answered
 from orchestrator.tools.spec_feature_tools import (
     read_feature_instructions,
     read_all_constitution_files,
@@ -204,13 +204,21 @@ Otherwise, set clarifications to null and provide all three files.
         
         print(f"[Spec Planner] Created files: {', '.join(files_created)}")
         
-        return {
+        # Set feature_id and phase based on what was created
+        update_state: Dict[str, Any] = {
             "feature_name": feature_name,
+            "feature_id": feature_name,  # Use feature_name as feature_id
             "spec_path": spec_path,
-            "spec_review_status": "pending" if not needs_clarifications else "needs_revision",
             "token_usage": token_update,
             "messages": [f"Spec Planner created specifications for feature: {feature_name}"]
         }
+        
+        if needs_clarifications:
+            update_state["phase"] = "QUESTIONS_PENDING"
+        else:
+            update_state["phase"] = "SPEC_DRAFT"
+        
+        return update_state
         
     except json.JSONDecodeError as e:
         print(f"Spec Planner JSON Parse Error: {e}")
@@ -222,22 +230,59 @@ Otherwise, set clarifications to null and provide all three files.
 
 def spec_planner_router(state: SharedState) -> str:
     """
-    Router for spec planner - determines next step.
+    Router for spec planner - determines next step based on phase.
     """
-    review_status = state.get('spec_review_status', 'pending')
+    from orchestrator.state import can_enter_node, is_valid_transition
     
-    # If clarifications were created, we need to wait
-    if review_status == 'needs_revision':
+    current_phase = state.get('phase', 'INTAKE')
+    
+    # Check if we can enter this node from current phase
+    if not can_enter_node("spec_planner", current_phase) and current_phase != "INTAKE":
+        print(f"[Spec Planner Router] Illegal transition from phase {current_phase} to spec_planner")
+        return "__end__"
+    
+    # If questions are pending, check if they have been answered
+    if current_phase == "QUESTIONS_PENDING":
         # Check if clarifications exist and have answers
         feature_name = state.get('feature_name')
         spec_path = state.get('spec_path', 'spec/')
+        open_questions = state.get('open_questions', [])
+        
+        # Check structured questions first
+        if open_questions and all_questions_answered(open_questions):
+            # All questions answered - can proceed
+            if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
+                return "spec_planner"  # Re-run planner with answers
+        
+        # Fallback: check clarifications file format
         if feature_name:
             clarifications = read_spec_file(feature_name, 'clarifications', spec_path)
-            # Simple check: if clarifications exist and are not just questions, proceed
             if clarifications and "## Answers" in clarifications:
-                return "spec_planner"  # Re-run planner with answers
+                if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
+                    return "spec_planner"  # Re-run planner with answers
             elif clarifications:
-                return "__end__"  # Wait for user to answer
+                return "__end__"  # Wait for user to answer questions
+        
+        # Still pending questions
+        return "__end__"
     
-    # After creating specs, go to reviewer
-    return "spec_reviewer"
+    # After creating specs (SPEC_DRAFT), go to reviewer
+    if current_phase == "SPEC_DRAFT":
+        if is_valid_transition("SPEC_DRAFT", "SPEC_REVIEW"):
+            return "spec_reviewer"
+    
+    # Default: after INTAKE or if phase transition is valid
+    if current_phase in ["INTAKE", "QUESTIONS_PENDING"]:
+        # INTAKE -> SPEC_DRAFT is handled by the node itself
+        # After node creates spec, phase becomes SPEC_DRAFT, then we go to reviewer
+        # This router is called after the node, so we check the resulting phase
+        # Actually, we should check the phase that was just set
+        resulting_phase = state.get('phase', current_phase)
+        if resulting_phase == "SPEC_DRAFT" and is_valid_transition("SPEC_DRAFT", "SPEC_REVIEW"):
+            return "spec_reviewer"
+        elif resulting_phase == "QUESTIONS_PENDING":
+            return "__end__"
+    
+    # Fallback: end if no valid transition
+    print(f"[Spec Planner Router] No valid transition from phase {current_phase}")
+    return "__end__"

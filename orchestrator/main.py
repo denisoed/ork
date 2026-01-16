@@ -186,8 +186,12 @@ def run_orchestrator(user_input: str) -> dict:
             "deployment_urls": {},
             "spec_path": "spec/",
             "feature_name": None,
-            "spec_review_status": "pending",
-            "spec_questions": [],
+            # State machine fields
+            "phase": "INTAKE",
+            "feature_id": None,
+            "open_questions": [],
+            "acceptance_criteria": [],
+            "evidence": [],
             "final_validation_report": None
         }
         

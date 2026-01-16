@@ -2,7 +2,7 @@ import json
 import os
 import time
 from typing import List, Dict, Any, Optional
-from orchestrator.state import SharedState, Task
+from orchestrator.state import SharedState, Task, can_enter_node, is_valid_transition
 from orchestrator.utils.caching import get_cached_content
 from orchestrator.tools.spec_feature_tools import (
     read_spec_file,
@@ -134,14 +134,27 @@ def supervisor_node(state: SharedState) -> SharedState:
     """
     The Supervisor Node responsible for planning and decomposition.
     """
+    from orchestrator.state import can_enter_node
+    
     # Ensure API is configured
     _ensure_api_configured()
+    
+    # Check if we can enter this node from current phase
+    current_phase = state.get('phase', 'INTAKE')
+    if not can_enter_node("supervisor", current_phase):
+        return {
+            "error_logs": [{"node": "supervisor", "error": f"Cannot enter supervisor from phase {current_phase}"}],
+            "phase": "FAILED"
+        }
     
     # Check if all tasks are already completed - no need to replan
     existing_tasks = state.get('tasks_queue', [])
     if existing_tasks:
         running_tasks = [t for t in existing_tasks if t['status'] == 'running']
         if running_tasks:
+            # Tasks are running - set phase to EXECUTING if not already
+            if current_phase == "EXEC_PLANNED":
+                return {"phase": "EXECUTING"}
             return {}
 
         pending_tasks = [t for t in existing_tasks if t['status'] == 'pending']
@@ -149,10 +162,16 @@ def supervisor_node(state: SharedState) -> SharedState:
         
         # If there are pending tasks, don't regenerate the plan
         if pending_tasks and not failed_tasks:
+            # Set phase to EXECUTING if tasks are pending
+            if current_phase in ["EXEC_PLANNED", "IMPL_REVIEW"]:
+                return {"phase": "EXECUTING"}
             return {}
         
-        # If all tasks are completed, end
+        # If all tasks are completed, set phase appropriately
         if all(t['status'] == 'completed' for t in existing_tasks):
+            # All tasks done - should go to final validator
+            if current_phase == "EXECUTING":
+                return {"phase": "EXECUTING"}  # Will transition to VALIDATING via router
             return {}
     
     user_msg = _get_last_user_message(state.get('messages', []))
@@ -189,8 +208,35 @@ SPEC-FEATURE SPECIFICATIONS:
 
 INSTRUCTIONS: Use tasks.md as the primary source for creating tasks. Convert tasks from tasks.md into the JSON format required. Ensure all tasks from tasks.md are included.
 """
+                
+                # Extract acceptance criteria from spec/tasks
+                # Simple heuristic: extract checkboxes or numbered criteria from spec/tasks
+                acceptance_criteria = []
+                # Look for acceptance criteria in spec.md (common patterns)
+                lines = spec_content.split('\n')
+                in_criteria_section = False
+                for line in lines:
+                    if 'acceptance' in line.lower() and 'criteri' in line.lower():
+                        in_criteria_section = True
+                        continue
+                    if in_criteria_section:
+                        if line.strip().startswith('-') or line.strip().startswith('*') or line.strip().startswith('1.') or line.strip().startswith('*'):
+                            criterion = line.strip().lstrip('-*123456789. ').strip()
+                            if criterion and len(criterion) > 10:  # Filter out short/simple markers
+                                acceptance_criteria.append(criterion)
+                        elif line.strip() and not line.strip().startswith('#'):
+                            in_criteria_section = False
+                
+                # If no criteria found, create a default one
+                if not acceptance_criteria:
+                    acceptance_criteria = [
+                        f"All tasks from tasks.md are completed",
+                        f"Implementation matches spec.md requirements",
+                        f"Implementation follows plan.md architecture"
+                    ]
         except Exception as e:
             print(f"Warning: Could not read spec-feature files: {e}")
+            acceptance_criteria = []
     
     # Build context with existing task statuses
     task_context = ""
@@ -252,11 +298,31 @@ INSTRUCTIONS: Use tasks.md as the primary source for creating tasks. Convert tas
             "total_tokens": usage.total_token_count
         }
             
-        # Return only new/updated tasks - the reducer will merge them
-        return {
+        # Determine phase: if this is the first planning (no existing tasks), set EXEC_PLANNED
+        # Otherwise, if we're planning, we're in EXEC_PLANNED -> EXECUTING transition
+        update_state: Dict[str, Any] = {
             "tasks_queue": new_tasks,
             "token_usage": token_update
         }
+        
+        # Set phase based on whether this is initial planning or replanning
+        if not existing_tasks and new_tasks:
+            # First planning - set EXEC_PLANNED
+            if is_valid_transition(current_phase, "EXEC_PLANNED"):
+                update_state["phase"] = "EXEC_PLANNED"
+            else:
+                update_state["phase"] = current_phase
+        elif new_tasks:
+            # Replanning - ensure we're in EXECUTING phase
+            if is_valid_transition(current_phase, "EXECUTING"):
+                update_state["phase"] = "EXECUTING"
+        
+        # Set acceptance criteria if extracted
+        if 'acceptance_criteria' in locals() and acceptance_criteria:
+            update_state["acceptance_criteria"] = acceptance_criteria
+        
+        # Return only new/updated tasks - the reducer will merge them
+        return update_state
         
     except json.JSONDecodeError as e:
         print(f"Supervisor JSON Parse Error: {e}")
@@ -272,7 +338,18 @@ def supervisor_router(state: SharedState) -> str:
     """
     Determines the next step: which worker to run.
     Returns a single role string for the conditional edge.
+    Checks phase before allowing transitions.
     """
+    from orchestrator.state import can_enter_node, is_valid_transition
+    
+    # Check phase
+    current_phase = state.get('phase', 'INTAKE')
+    
+    # Check if we can enter this node from current phase
+    if not can_enter_node("supervisor", current_phase):
+        print(f"[Supervisor Router] Illegal transition from phase {current_phase} to supervisor")
+        return "__end__"
+    
     # Check recursion limit
     if state.get('recursion_depth', 0) >= MAX_RECURSION_DEPTH:
         print(f"Recursion limit reached ({MAX_RECURSION_DEPTH}). Ending execution.")
@@ -314,7 +391,12 @@ def supervisor_router(state: SharedState) -> str:
         # Check if ALL tasks are completed
         if all(t['status'] == 'completed' for t in tasks):
             print("All tasks completed successfully. Proceeding to final validation.")
-            return "__end__"  # This will route to final_validator in main.py
+            # Check phase before going to final_validator
+            if current_phase == "EXECUTING" and is_valid_transition("EXECUTING", "VALIDATING"):
+                return "__end__"  # This will route to final_validator in main.py
+            elif current_phase not in ["EXECUTING", "IMPL_REVIEW"]:
+                print(f"[Supervisor Router] Cannot transition to final_validator from phase {current_phase}")
+                return "__end__"
         
         if running_tasks:
             return "__end__"
@@ -325,6 +407,11 @@ def supervisor_router(state: SharedState) -> str:
             print(f"Warning: {len(pending_tasks)} tasks pending but none ready. Possible circular dependency.")
             return "human_intervention"
             
+        return "__end__"
+    
+    # Check phase before going to dispatcher
+    if not can_enter_node("dispatcher", current_phase):
+        print(f"[Supervisor Router] Cannot transition to dispatcher from phase {current_phase}")
         return "__end__"
     
     print(f"Routing to dispatcher for {len(ready_tasks)} ready tasks")

@@ -4,7 +4,7 @@ import hashlib
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState, Task
+from orchestrator.state import SharedState, Task, add_evidence
 from orchestrator.tools.fs_tools import read_file, write_file, list_files, WORKSPACE_DIR
 from orchestrator.tools.shell_tools import run_shell_command
 from orchestrator.tools.deploy_tools import (
@@ -274,10 +274,22 @@ def worker_node(state: SharedState, role: str) -> SharedState:
         
         print(f"[{role}] Completed task: {target_task['id']}")
         
+        # Add evidence for this task
+        evidence_list = state.get('evidence', []).copy()
+        add_evidence(
+            evidence_list,
+            evidence_type="task_execution",
+            requirement_id=target_task.get('id'),
+            command=None,  # Could extract from result_text if needed
+            output_path=None,
+            status="pending"  # Will be validated by validator
+        )
+        
         return {
             "messages": [f"Worker {role} finished task {target_task['id']}: {result_text}"],
             "token_usage": token_update,
-            "files_snapshot": new_snapshot
+            "files_snapshot": new_snapshot,
+            "evidence": evidence_list
         }
         
     except Exception as e:

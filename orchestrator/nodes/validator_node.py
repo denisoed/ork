@@ -1,7 +1,7 @@
 import os
 import re
 from typing import Optional, Tuple, List, Dict
-from orchestrator.state import SharedState
+from orchestrator.state import SharedState, add_evidence, update_evidence_status
 from orchestrator.tools.shell_tools import run_shell_command
 from orchestrator.tools.fs_tools import WORKSPACE_DIR
 from orchestrator.nodes.worker_node import get_current_task_id
@@ -343,15 +343,36 @@ def validator_node(state: SharedState, role: str) -> SharedState:
                     validation_passed = False
                     error_messages.append(error)
 
+    # Get evidence list
+    evidence_list = state.get('evidence', []).copy()
+    
     # Update task status based on validation
     if validation_passed:
         target_task['status'] = 'completed'
         target_task['feedback'] = "Validation passed"
         print(f"[Validator:{role}] Task {target_task['id']} PASSED validation")
         
+        # Add evidence for validation
+        add_evidence(
+            evidence_list,
+            evidence_type="validation_result",
+            requirement_id=target_task.get('id'),
+            command=None,
+            output_path=None,
+            status="passed"
+        )
+        
+        # Update evidence for task execution (if exists)
+        for ev in evidence_list:
+            if ev.get("requirement_id") == target_task['id'] and ev.get("type") == "task_execution":
+                update_evidence_status(evidence_list, ev.get("id"), "validated")
+                break
+        
         result = {
             "tasks_queue": [target_task],
-            "recursion_depth": state.get("recursion_depth", 0) + 1
+            "recursion_depth": state.get("recursion_depth", 0) + 1,
+            "evidence": evidence_list,
+            "phase": "IMPL_REVIEW"  # Set phase after validation
         }
         
         # Add deployment URLs if extracted
@@ -373,8 +394,19 @@ def validator_node(state: SharedState, role: str) -> SharedState:
         else:
             target_task['status'] = 'pending'
              
+        # Add evidence for failed validation
+        add_evidence(
+            evidence_list,
+            evidence_type="validation_result",
+            requirement_id=target_task.get('id'),
+            command=None,
+            output_path=None,
+            status="failed"
+        )
+        
         return {
             "tasks_queue": [target_task],
             "recursion_depth": state.get("recursion_depth", 0) + 1,
-            "error_logs": [{"node": f"validator_{role}", "task_id": target_task['id'], "errors": error_messages}]
+            "error_logs": [{"node": f"validator_{role}", "task_id": target_task['id'], "errors": error_messages}],
+            "evidence": evidence_list
         }

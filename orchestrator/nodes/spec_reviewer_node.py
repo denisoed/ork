@@ -8,7 +8,7 @@ import json
 from typing import Optional, Any, Dict
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from orchestrator.state import SharedState
+from orchestrator.state import SharedState, add_open_question, all_questions_answered, is_valid_transition
 from orchestrator.tools.spec_feature_tools import (
     read_all_constitution_files,
     read_template_file,
@@ -53,15 +53,26 @@ def spec_reviewer_node(state: SharedState) -> SharedState:
     """
     Specification Reviewer Node - validates specifications.
     """
+    from orchestrator.state import can_enter_node
+    
     _ensure_api_configured()
     
     feature_name = state.get('feature_name')
     spec_path = state.get('spec_path', 'spec/')
+    current_phase = state.get('phase', 'INTAKE')
+    
+    # Check if we can enter this node from current phase
+    if not can_enter_node("spec_reviewer", current_phase):
+        return {
+            "error_logs": [{"node": "spec_reviewer", "error": f"Cannot enter spec_reviewer from phase {current_phase}"}],
+            "phase": "FAILED"
+        }
     
     if not feature_name:
         return {"error_logs": [{"node": "spec_reviewer", "error": "No feature_name in state."}]}
     
-    print(f"[Spec Reviewer] Reviewing feature: {feature_name}")
+    # Set phase to SPEC_REVIEW when starting review
+    print(f"[Spec Reviewer] Reviewing feature: {feature_name} (phase: {current_phase} -> SPEC_REVIEW)")
     
     # Read specification files
     spec_content = read_spec_file(feature_name, 'spec', spec_path)
@@ -72,7 +83,7 @@ def spec_reviewer_node(state: SharedState) -> SharedState:
     if not spec_content or not plan_content or not tasks_content:
         return {
             "error_logs": [{"node": "spec_reviewer", "error": "Missing specification files"}],
-            "spec_review_status": "needs_revision"
+            "phase": "QUESTIONS_PENDING"
         }
     
     # Read constitution
@@ -155,6 +166,13 @@ If status is "needs_revision", provide specific issues and questions that need t
         if questions:
             print(f"[Spec Reviewer] Questions: {len(questions)}")
         
+        # Get existing open_questions
+        open_questions = state.get('open_questions', []).copy()
+        
+        # Convert questions to structured open_questions format
+        for q in questions:
+            add_open_question(open_questions, q)
+        
         # If questions are needed, update clarifications.md
         if questions and status == "needs_revision":
             clarifications_content_new = clarifications_content or ""
@@ -177,9 +195,17 @@ If status is "needs_revision", provide specific issues and questions that need t
             "total_tokens": usage.total_token_count
         }
         
+        # Determine phase based on status
+        if status == "approved":
+            new_phase = "SPEC_APPROVED"
+        elif questions:
+            new_phase = "QUESTIONS_PENDING"
+        else:
+            new_phase = "SPEC_DRAFT"  # Needs revision but no questions
+        
         return {
-            "spec_review_status": status,
-            "spec_questions": questions,
+            "phase": new_phase,
+            "open_questions": open_questions,
             "token_usage": token_update,
             "messages": [f"Spec Reviewer: {status}. {summary}"]
         }
@@ -189,31 +215,66 @@ If status is "needs_revision", provide specific issues and questions that need t
         print(f"Response was: {response_text[:500]}")
         return {
             "error_logs": [{"node": "spec_reviewer", "error": f"Invalid JSON response: {e}"}],
-            "spec_review_status": "needs_revision"
+            "phase": "FAILED"
         }
     except Exception as e:
         print(f"Spec Reviewer Error: {e}")
         return {
             "error_logs": [{"node": "spec_reviewer", "error": str(e)}],
-            "spec_review_status": "needs_revision"
+            "phase": "FAILED"
         }
 
 def spec_reviewer_router(state: SharedState) -> str:
     """
-    Router for spec reviewer - determines next step based on review status.
+    Router for spec reviewer - determines next step based on phase.
     """
-    review_status = state.get('spec_review_status', 'pending')
+    from orchestrator.state import can_enter_node
     
-    if review_status == 'approved':
-        return "supervisor"
-    elif review_status == 'needs_revision':
-        # Check if clarifications have answers
+    current_phase = state.get('phase', 'INTAKE')
+    
+    # Check if we can enter this node from current phase
+    if not can_enter_node("spec_reviewer", current_phase):
+        print(f"[Spec Reviewer Router] Illegal transition from phase {current_phase} to spec_reviewer")
+        return "__end__"
+    
+    # After review, check the resulting phase
+    resulting_phase = state.get('phase', current_phase)
+    
+    if resulting_phase == "SPEC_APPROVED":
+        # Spec approved - go to supervisor
+        if is_valid_transition("SPEC_APPROVED", "EXEC_PLANNED"):
+            return "supervisor"
+    
+    elif resulting_phase == "QUESTIONS_PENDING":
+        # Questions pending - check if they have answers
+        open_questions = state.get('open_questions', [])
+        
+        # Check structured questions first
+        if open_questions and all_questions_answered(open_questions):
+            # All questions answered - return to spec_planner
+            if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
+                return "spec_planner"
+        
+        # Fallback: check clarifications file format
         feature_name = state.get('feature_name')
         spec_path = state.get('spec_path', 'spec/')
         if feature_name:
             clarifications = read_spec_file(feature_name, 'clarifications', spec_path)
             if clarifications and "## Answers" in clarifications:
-                return "spec_planner"  # Re-run planner with answers
-        return "__end__"  # Wait for user to answer questions
+                if is_valid_transition("QUESTIONS_PENDING", "SPEC_DRAFT"):
+                    return "spec_planner"  # Re-run planner with answers
+        
+        # Still pending questions - wait for user
+        return "__end__"
     
+    elif resulting_phase == "SPEC_DRAFT":
+        # Needs revision - return to spec_planner
+        if is_valid_transition("SPEC_DRAFT", "SPEC_REVIEW"):
+            return "spec_planner"
+    
+    elif resulting_phase == "FAILED":
+        return "__end__"
+    
+    # Fallback: end if no valid transition
+    print(f"[Spec Reviewer Router] No valid transition from phase {resulting_phase}")
     return "__end__"

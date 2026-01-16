@@ -96,15 +96,26 @@ def final_validator_node(state: SharedState) -> SharedState:
     """
     Final Validator Node - validates implementation and creates verify-report.md.
     """
+    from orchestrator.state import can_enter_node, is_valid_transition
+    
     _ensure_api_configured()
     
     feature_name = state.get('feature_name')
     spec_path = state.get('spec_path', 'spec/')
+    current_phase = state.get('phase', 'INTAKE')
+    
+    # Check if we can enter this node from current phase
+    if not can_enter_node("final_validator", current_phase):
+        return {
+            "error_logs": [{"node": "final_validator", "error": f"Cannot enter final_validator from phase {current_phase}"}],
+            "phase": "FAILED"
+        }
     
     if not feature_name:
         return {"error_logs": [{"node": "final_validator", "error": "No feature_name in state."}]}
     
-    print(f"[Final Validator] Validating feature: {feature_name}")
+    # Set phase to VALIDATING when starting validation
+    print(f"[Final Validator] Validating feature: {feature_name} (phase: {current_phase} -> VALIDATING)")
     
     # Read specification files
     spec_content = read_spec_file(feature_name, 'spec', spec_path)
@@ -264,7 +275,22 @@ Status: {validation_result.get('status', 'unknown')}
         validation_status = validation_result.get('status', 'failed')
         print(f"[Final Validator] Validation status: {validation_status}")
         
+        # Determine phase based on validation status
+        if validation_status == "passed":
+            # Validation passed - move to TRACE_VALIDATION, then DONE
+            new_phase = "TRACE_VALIDATION"
+            # After trace validation (which is done here), set to DONE
+            # Actually, we'll set DONE immediately after TRACE_VALIDATION in this node
+            # But let's set TRACE_VALIDATION first, then transition to DONE
+            if is_valid_transition("VALIDATING", "TRACE_VALIDATION"):
+                # Set to TRACE_VALIDATION, then immediately to DONE if all checks pass
+                new_phase = "DONE"
+        else:
+            # Validation failed
+            new_phase = "FAILED"
+        
         return {
+            "phase": new_phase,
             "final_validation_report": {
                 "status": validation_status,
                 "spec_compliance": validation_result.get('spec_compliance', False),
@@ -285,11 +311,13 @@ Status: {validation_result.get('status', 'unknown')}
         print(f"Response was: {response_text[:500]}")
         return {
             "error_logs": [{"node": "final_validator", "error": f"Invalid JSON response: {e}"}],
-            "final_validation_report": {"status": "failed", "error": "JSON parse error"}
+            "final_validation_report": {"status": "failed", "error": "JSON parse error"},
+            "phase": "FAILED"
         }
     except Exception as e:
         print(f"Final Validator Error: {e}")
         return {
             "error_logs": [{"node": "final_validator", "error": str(e)}],
-            "final_validation_report": {"status": "failed", "error": str(e)}
+            "final_validation_report": {"status": "failed", "error": str(e)},
+            "phase": "FAILED"
         }
