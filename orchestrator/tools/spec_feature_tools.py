@@ -91,6 +91,47 @@ def read_template_file(template_name: str, spec_path: Optional[str] = None) -> s
         return f.read()
 
 
+def parse_run_tasks_intent(user_input: str) -> Optional[Tuple[str, str]]:
+    """
+    Parse RUN_TASKS intent from user input.
+    
+    Supports formats:
+    - RUN spec/features/<feature-name>/tasks.md
+    - RUN <feature-name>
+    
+    Args:
+        user_input: User request string
+        
+    Returns:
+        Tuple of (feature_name, tasks_path) if intent detected, None otherwise
+    """
+    user_input_lower = user_input.strip().upper()
+    
+    # Check if input starts with RUN
+    if not user_input_lower.startswith("RUN"):
+        return None
+    
+    # Extract the part after RUN
+    rest = user_input[len("RUN"):].strip()
+    
+    # Pattern 1: RUN spec/features/<feature-name>/tasks.md
+    pattern1 = re.search(r'spec[/\\]features[/\\]([^/\\]+)[/\\]tasks\.md', rest, re.IGNORECASE)
+    if pattern1:
+        feature_name = pattern1.group(1).strip()
+        tasks_path = f"spec/features/{feature_name}/tasks.md"
+        return feature_name, tasks_path
+    
+    # Pattern 2: RUN <feature-name> (simple format)
+    # Extract feature name (everything after RUN, up to space or end)
+    match = re.match(r'^([a-z0-9_-]+)', rest, re.IGNORECASE)
+    if match:
+        feature_name = match.group(1).strip()
+        tasks_path = f"spec/features/{feature_name}/tasks.md"
+        return feature_name, tasks_path
+    
+    return None
+
+
 def parse_feature_request(user_input: str) -> Tuple[str, str]:
     """
     Parse feature request in format #feature-name# context.

@@ -136,7 +136,7 @@ PHASE_TRANSITIONS: Dict[str, List[str]] = {
 
 # Node to phase mapping: which phases allow entering specific nodes
 NODE_PHASES: Dict[str, List[str]] = {
-    "spec_planner": ["INTAKE", "QUESTIONS_PENDING"],
+    "spec_planner": ["INTAKE", "QUESTIONS_PENDING", "EXEC_PLANNED"],  # EXEC_PLANNED for RUN_TASKS intent
     "spec_reviewer": ["SPEC_DRAFT"],
     "supervisor": ["SPEC_APPROVED", "EXEC_PLANNED", "EXECUTING", "IMPL_REVIEW"],
     "dispatcher": ["EXEC_PLANNED", "EXECUTING", "IMPL_REVIEW"],

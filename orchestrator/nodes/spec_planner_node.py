@@ -14,6 +14,7 @@ from orchestrator.tools.spec_feature_tools import (
     read_all_constitution_files,
     read_template_file,
     parse_feature_request,
+    parse_run_tasks_intent,
     ensure_feature_directory,
     write_spec_file,
     read_spec_file,
@@ -67,13 +68,40 @@ def _get_last_user_message(messages) -> str:
 def spec_planner_node(state: SharedState) -> SharedState:
     """
     Specification Planner Node - creates specifications following spec/feature.md.
+    Also handles RUN_TASKS intent to start execution phase.
     """
-    _ensure_api_configured()
-    
     # Get user message
     user_msg = _get_last_user_message(state.get('messages', []))
     if not user_msg:
         return {"error_logs": [{"node": "spec_planner", "error": "No user message found in state."}]}
+    
+    # Check for RUN_TASKS intent first
+    run_tasks_result = parse_run_tasks_intent(user_msg)
+    if run_tasks_result:
+        feature_name, tasks_path = run_tasks_result
+        spec_path = state.get('spec_path', 'spec/')
+        
+        print(f"[Spec Planner] Detected RUN_TASKS intent for feature: {feature_name}")
+        
+        # Verify that tasks.md exists
+        tasks_content = read_spec_file(feature_name, 'tasks', spec_path)
+        if not tasks_content:
+            return {
+                "error_logs": [{"node": "spec_planner", "error": f"Tasks file not found: {tasks_path}. Please ensure specs are approved first."}],
+                "phase": "FAILED"
+            }
+        
+        # Set phase to EXEC_PLANNED and return state
+        return {
+            "feature_name": feature_name,
+            "feature_id": feature_name,
+            "spec_path": spec_path,
+            "phase": "EXEC_PLANNED",
+            "messages": [f"RUN_TASKS intent detected. Starting execution for feature: {feature_name}"]
+        }
+    
+    # Normal flow: parse feature request and create specs
+    _ensure_api_configured()
     
     # Parse feature request
     try:
@@ -237,8 +265,17 @@ def spec_planner_router(state: SharedState) -> str:
     current_phase = state.get('phase', 'INTAKE')
     
     # Check if we can enter this node from current phase
-    if not can_enter_node("spec_planner", current_phase) and current_phase != "INTAKE":
+    if not can_enter_node("spec_planner", current_phase) and current_phase not in ["INTAKE", "EXEC_PLANNED"]:
         print(f"[Spec Planner Router] Illegal transition from phase {current_phase} to spec_planner")
+        return "__end__"
+    
+    # If RUN_TASKS intent was processed, go to supervisor
+    if current_phase == "EXEC_PLANNED":
+        feature_name = state.get('feature_name')
+        if feature_name:
+            print(f"[Spec Planner Router] EXEC_PLANNED phase detected. Routing to supervisor for feature: {feature_name}")
+            if is_valid_transition("EXEC_PLANNED", "EXECUTING"):
+                return "supervisor"
         return "__end__"
     
     # If questions are pending, check if they have been answered

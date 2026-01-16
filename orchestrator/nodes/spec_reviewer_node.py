@@ -198,6 +198,18 @@ If status is "needs_revision", provide specific issues and questions that need t
         # Determine phase based on status
         if status == "approved":
             new_phase = "SPEC_APPROVED"
+            # Add notification message for user
+            spec_path_value = state.get('spec_path', 'spec/')
+            notification_msg = (
+                f"Спеки готовы: {spec_path_value}/features/{feature_name}/spec.md и tasks.md\n"
+                f"Чтобы начать разработку — напишите команду: RUN {spec_path_value}/features/{feature_name}/tasks.md"
+            )
+            return {
+                "phase": new_phase,
+                "open_questions": open_questions,
+                "token_usage": token_update,
+                "messages": [f"Spec Reviewer: {status}. {summary}\n\n{notification_msg}"]
+            }
         elif questions:
             new_phase = "QUESTIONS_PENDING"
         else:
@@ -241,9 +253,9 @@ def spec_reviewer_router(state: SharedState) -> str:
     resulting_phase = state.get('phase', current_phase)
     
     if resulting_phase == "SPEC_APPROVED":
-        # Spec approved - go to supervisor
-        if is_valid_transition("SPEC_APPROVED", "EXEC_PLANNED"):
-            return "supervisor"
+        # Spec approved - end graph and wait for RUN_TASKS command
+        print(f"[Spec Reviewer Router] Specs approved. Graph ends. User must run: RUN spec/features/{state.get('feature_name', 'feature')}/tasks.md")
+        return "__end__"
     
     elif resulting_phase == "QUESTIONS_PENDING":
         # Questions pending - check if they have answers

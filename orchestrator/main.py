@@ -65,6 +65,7 @@ def build_graph():
         spec_planner_router,
         {
             "spec_reviewer": "spec_reviewer",
+            "supervisor": "supervisor",  # For RUN_TASKS intent (EXEC_PLANNED phase)
             "__end__": END
         }
     )
