@@ -89,3 +89,4 @@ Template helps create and maintain requirement traceability artifact (`trace.jso
 
 Write strictly valid JSON and automatically create/update the traceability file. **Goal** — create/update file `/spec/features/{FEATURE}/trace.json` tracking the relationship between requirements, their implementation, verification, and evidence.
 
+

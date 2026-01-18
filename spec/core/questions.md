@@ -48,3 +48,4 @@ Template collects all blocking questions for a feature in the **spec-feature** p
 
 Write strictly in Markdown and automatically create/update the questions file. **Goal** — create/update file `/spec/features/{FEATURE}/questions.md` to capture all blocking questions and user answers for this feature.
 
+

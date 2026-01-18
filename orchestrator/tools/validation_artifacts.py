@@ -146,3 +146,4 @@ def get_validation_summary(project_root: Optional[str] = None) -> Optional[Dict[
         print(f"Error reading validation summary: {e}")
         return None
 
+
