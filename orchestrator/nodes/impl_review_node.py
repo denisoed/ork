@@ -60,9 +60,16 @@ def _call_api_with_retry(chat, prompt: str, max_retries: int = 3) -> Optional[An
     raise Exception(f"API call failed after {max_retries} retries")
 
 def _get_changed_files(state: SharedState) -> List[str]:
-    """Get list of files that were potentially changed."""
+    """Get list of files that were potentially changed, excluding artifacts/logs."""
     snapshot = state.get('files_snapshot', {})
-    return list(snapshot.keys())
+    changed = []
+    for path in snapshot.keys():
+        if path.startswith("artifacts/"):
+            continue
+        if path.endswith(".log"):
+            continue
+        changed.append(path)
+    return changed
 
 def _get_file_contents(filepaths: List[str], max_size: int = 5000) -> str:
     """Read contents of changed files for analysis."""
@@ -301,8 +308,8 @@ If status is "issues", provide specific actionable issues that need to be fixed.
             for corrective_task in corrective_tasks:
                 existing_tasks.append(corrective_task)
             
-            # Mark original task as pending (needs correction)
-            target_task['status'] = 'pending'
+            # Mark original task as completed so corrective tasks can run
+            target_task['status'] = 'completed'
             target_task['feedback'] = f"Impl review found {len(issues)} issue(s): {summary[:200]}"
             
             # Update original task in queue
@@ -313,18 +320,11 @@ If status is "issues", provide specific actionable issues that need to be fixed.
             
             print(f"[Impl Review:{role}] Created {len(corrective_tasks)} corrective task(s). Returning to EXECUTING.")
             
-            # Handle error with retry budget for issues found
-            error_result = handle_error_with_retry_budget(
-                state,
-                f"impl_review_{role}",
-                f"Impl review found {len(issues)} issue(s): {summary[:200]}",
-                task_id=target_task['id'],
-                context={"issues": issues, "role": role}
-            )
-            error_result["tasks_queue"] = existing_tasks
-            error_result["token_usage"] = token_update
-            error_result["phase"] = "EXECUTING"
-            return error_result
+            return {
+                "tasks_queue": existing_tasks,
+                "token_usage": token_update,
+                "phase": "EXECUTING"
+            }
         
     except json.JSONDecodeError as e:
         print(f"[Impl Review:{role}] JSON Parse Error: {e}")
@@ -394,4 +394,3 @@ def impl_review_router(state: SharedState, role: str) -> str:
     validator_node = validator_node_map.get(role, "val_ui")
     print(f"[Impl Review Router:{role}] Unexpected phase {current_phase}. Defaulting to {validator_node}.")
     return validator_node
-

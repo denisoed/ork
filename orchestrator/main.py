@@ -296,6 +296,9 @@ def run_orchestrator(user_input: str) -> dict:
                 logger.debug(f"Node completed: {node_name}")
                 
                 # Update final state
+                if node_state is None:
+                    logger.warning(f"Node {node_name} returned None; skipping state update")
+                    node_state = {}
                 final_state.update(node_state)
                 
                 # Track token usage

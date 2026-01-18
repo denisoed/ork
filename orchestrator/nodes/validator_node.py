@@ -1,7 +1,12 @@
 import os
 import re
 from typing import Optional, Tuple, List, Dict
-from orchestrator.state import SharedState, add_evidence, update_evidence_status
+from orchestrator.state import (
+    SharedState,
+    add_evidence,
+    update_evidence_status,
+    handle_error_with_retry_budget,
+)
 from orchestrator.tools.shell_tools import run_shell_command
 from orchestrator.tools.fs_tools import WORKSPACE_DIR
 from orchestrator.nodes.worker_node import get_current_task_id

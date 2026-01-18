@@ -328,8 +328,7 @@ INSTRUCTIONS: Use tasks.md as the primary source for creating tasks. Convert tas
             "total_tokens": usage.total_token_count
         }
             
-        # Determine phase: if this is the first planning (no existing tasks), set EXEC_PLANNED
-        # Otherwise, if we're planning, we're in EXEC_PLANNED -> EXECUTING transition
+        # Determine phase: if this is the first planning (no existing tasks), move into execution.
         update_state: Dict[str, Any] = {
             "tasks_queue": new_tasks,
             "token_usage": token_update
@@ -337,8 +336,10 @@ INSTRUCTIONS: Use tasks.md as the primary source for creating tasks. Convert tas
         
         # Set phase based on whether this is initial planning or replanning
         if not existing_tasks and new_tasks:
-            # First planning - set EXEC_PLANNED
-            if is_valid_transition(current_phase, "EXEC_PLANNED"):
+            # First planning - transition to EXECUTING so workers/impl review can proceed
+            if is_valid_transition(current_phase, "EXECUTING"):
+                update_state["phase"] = "EXECUTING"
+            elif is_valid_transition(current_phase, "EXEC_PLANNED"):
                 update_state["phase"] = "EXEC_PLANNED"
             else:
                 update_state["phase"] = current_phase
