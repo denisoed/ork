@@ -25,6 +25,7 @@ echo "-----------------------------------"
 # -v $(pwd)/spec:/app/spec: Maps host spec to container spec (for spec-feature)
 # --env-file .env: Passes API keys
 docker run --rm \
+    -v "$(pwd)/orchestrator":/app/orchestrator \
     -v "$(pwd)/workspace":/app/workspace \
     -v "$(pwd)/spec":/app/spec \
     --env-file .env \
