@@ -14,8 +14,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Supabase CLI globally
-RUN npm install -g supabase@latest
+# Install Supabase CLI (binary)
+RUN curl -L https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o supabase.tar.gz \
+    && tar -xzf supabase.tar.gz -C /usr/local/bin \
+    && rm supabase.tar.gz
 
 # Install Vercel CLI globally
 RUN npm install -g vercel@latest
